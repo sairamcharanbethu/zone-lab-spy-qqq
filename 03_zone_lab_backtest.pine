@@ -177,8 +177,15 @@ float bodyBot = math.min(open, close)
 float rbTop = ta.highest(bodyTop[1], rbRangeBars)
 float rbBot = ta.lowest(bodyBot[1], rbRangeBars)
 float rbHeight = rbTop - rbBot
-int rbOppLong = int(ta.sum(close[1] < open[1] ? 1.0 : 0.0, rbRangeBars))
-int rbOppShort = int(ta.sum(close[1] > open[1] ? 1.0 : 0.0, rbRangeBars))
+// Chart GT's Pine does not implement ta.sum — count opposite candles
+// with a plain loop instead (same result).
+int rbOppLong = 0
+int rbOppShort = 0
+for i = 1 to rbRangeBars
+    if close[i] < open[i]
+        rbOppLong += 1
+    if close[i] > open[i]
+        rbOppShort += 1
 bool rbRangeOK = not na(rbHeight) and rbHeight >= atr * 0.5 and rbHeight <= atr * 4.0
 float candleRange = math.max(high - low, syminfo.mintick)
 float bodySize = math.abs(close - open)

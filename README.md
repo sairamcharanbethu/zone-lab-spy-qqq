@@ -87,7 +87,7 @@ Two ideas from the Mathematical Indicator ([roan-maverick/tradingview-mathematic
 
 Test plan (same as v3.1): compile-check both files on Chart GT, Strategy Tester on Nov 13–20, 2026 (v3.1: 9 trades, +$59.89, PF 2.911), then the 6-month deep backtest (v3.1: −$86.96, PF 0.298 on regular-session-only data). v5 is a hypothesis, not a fix — the numbers decide whether it stays.
 
-**v5 results (2026-11-21, Chart GT):** _to be filled in after the test runs._
+**v5 results (2026-11-21, Chart GT):** _to be filled in after the test runs._ Chart GT fix during testing: its Pine does not implement `ta.sum`, so the opposite-candle counts in the rubber-band range use a plain loop instead (same result).
 
 ## Validation checklist
 
