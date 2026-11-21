@@ -39,6 +39,22 @@ Also: 01 signals are now confirmed-bar only (no intrabar repaint on a 1-minute c
 
 Honest limit: none of this makes the system "unstoppable." It removes specific, identified failure modes. The strategy still needs to be compiled in TradingView, backtested out-of-sample, and paper-traded before any real capital — and the backtest still trades the underlying share price, not 0DTE options.
 
+## v3 — 0DTE adaptation (2026-11-20)
+
+The system is now built around 0DTE options as the traded instrument. That changes the design, not just the labels:
+
+- **The backtest measures the underlying move, not option P&L.** Pine cannot price an option — no IV, theta, spread, or pin risk is modelled. A profitable underlying move does not guarantee a profitable 0DTE option. Use the backtest to validate signal timing and direction only.
+- **Risk-based sizing (03):** position size is now derived from a fixed risk per trade (default 1% of equity) divided by the ATR stop distance — not a fixed 10% of equity. For the option itself, size by premium risk: decide the dollars you will lose if the option goes to zero, and size contracts from that, not from the underlying notional.
+- **Daily loss limit (03):** no new entries once the day is down 2% from the open. A bad day stops being a revenge-trading day.
+- **Time stop (03):** a trade still open after 30 minutes is closed. On a 1-minute 0DTE setup, a trade going nowhere is usually wrong — and theta charges rent by the minute.
+- **Scale-out (03):** take 50% at 1R, let the rest run to 2R with the stop. All-in/all-out at 2R gave up too many winners that stalled at 1.5R.
+- **Earlier entry cutoff (03):** entries stop at 14:00 ET by default. Late-day 0DTE entries face accelerating theta and gamma risk.
+- **Confluence score (02):** every signal is scored 0–4 (VWAP alignment, confirmed 5m trend, relative volume, usable premarket range). Signals below the minimum score (default 3) are skipped.
+- **Full-plan alerts (02):** dynamic alerts now carry entry, stop, target, and score, so no math is needed mid-trade. Stop/target levels for the latest signal are also plotted and shown in the dashboard.
+- **0DTE discipline:** exit options by 15:30 at the latest — do not hold into the close (pin risk, collapsing liquidity). Use 0.40–0.60 delta for the balance of premium and directional exposure; avoid far out-of-the-money lottery tickets on these signals.
+
+Still to prove: full-history out-of-sample results (the Chart GT check ran only ~1 week / 4 trades), separate SPY vs QQQ performance, and paper-trading the option fills before any real capital.
+
 ## Validation checklist
 
 - Compile each script in TradingView Pine Editor (Pine Script v6).

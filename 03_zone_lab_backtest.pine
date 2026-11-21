@@ -3,6 +3,12 @@ strategy("Zone Lab — Intraday Signal Backtest", shorttitle="Zone Lab Test", ov
 
 // Underlying-share proxy only. This does NOT model option premiums, IV, theta, bid/ask spreads,
 // assignment, contract selection, or 0DTE execution. Use it to test signal timing on SPY/QQQ only.
+//
+// 0DTE ADAPTATION (v3): this backtests the UNDERLYING share move only. It
+// does NOT model option premiums, IV, theta, spreads or pin risk — a
+// profitable underlying move does not guarantee a profitable 0DTE option.
+// Use it to validate signal timing/direction, then size 0DTE trades by
+// premium risk (see README).
 string TZ = "America/New_York"
 string pmSession = input.session("0400-0930", "Premarket (New York)")
 int retestBars = input.int(10, "Retest window", minval=1, maxval=40)
@@ -16,8 +22,12 @@ int endDate = input.time(timestamp("31 Dec 2030 23:59 -0500"), "Backtest end")
 bool useVWAP = input.bool(true, "VWAP filter")
 bool use5m = input.bool(true, "Confirmed 5m trend filter")
 bool oneTradeDay = input.bool(true, "Maximum one entry per day")
-string entrySession = input.session("0930-1530", "Entry window (New York)")
+string entrySession = input.session("0930-1400", "Entry window (New York)")
 string eodSession = input.session("1555-1600", "End-of-day flatten window (New York)")
+float riskPct = input.float(1.0, "Risk per trade (% of equity)", minval=0.1, maxval=5.0, step=0.1)
+float maxDailyLossPct = input.float(2.0, "Max daily loss (% of equity)", minval=0.5, maxval=10.0, step=0.5)
+int timeStopMin = input.int(30, "Time stop (minutes in trade, 1m chart)", minval=5, maxval=120)
+int partialPct = input.int(50, "Scale out at 1R (% of position)", minval=10, maxval=90, step=10)
 
 bool inPM = not na(time(timeframe.period, pmSession, TZ))
 bool inEntryWindow = not na(time(timeframe.period, entrySession, TZ))
@@ -77,25 +87,53 @@ bool failedPDL = low < pdl and close > pdl and close > open
 
 bool longOK = inEntryWindow and barstate.isconfirmed and (longRetest or failedPMLow or failedPDL) and rvol >= minRVOL and (not useVWAP or close > vwap) and (not use5m or longTrend)
 bool shortOK = inEntryWindow and barstate.isconfirmed and (shortRetest or failedPMHigh or failedPDH) and rvol >= minRVOL and (not useVWAP or close < vwap) and (not use5m or shortTrend)
+// Daily loss limit: once the day is down maxDailyLossPct from the open,
+// no new entries. Prevents a bad day from becoming a revenge-trading day.
+var float dayStartEquity = na
+if newDay
+    dayStartEquity := strategy.equity
+bool dailyLossOK = na(dayStartEquity) or strategy.equity > dayStartEquity * (1 - maxDailyLossPct / 100)
+
 bool inDateRange = time >= startDate and time <= endDate
-bool allowed = inDateRange and (not oneTradeDay or not tradedToday) and strategy.position_size == 0
+bool allowed = inDateRange and dailyLossOK and (not oneTradeDay or not tradedToday) and strategy.position_size == 0
 
 var float longStop = na
 var float longTarget = na
 var float shortStop = na
 var float shortTarget = na
+var int entryBar = na
+if strategy.position_size == 0
+    entryBar := na
 if allowed and longOK
-    longStop := close - atr * stopATR
-    longTarget := close + (close-longStop) * rewardR
-    strategy.entry("LONG", strategy.long)
-    strategy.exit("LONG EXIT", "LONG", stop=longStop, limit=longTarget)
+    float riskAmt = strategy.equity * riskPct / 100
+    float stopDist = atr * stopATR
+    float qty = stopDist > 0 ? riskAmt / stopDist : na
+    longStop := close - stopDist
+    longTarget := close + (close - longStop) * rewardR
+    strategy.entry("LONG", strategy.long, qty=qty)
+    // Scale out: take partialPct at 1R, let the rest run to 2R with the stop.
+    strategy.exit("LONG 1R", "LONG", qty_percent=partialPct, limit=close + (close - longStop))
+    strategy.exit("LONG 2R", "LONG", stop=longStop, limit=longTarget)
+    entryBar := bar_index
     tradedToday := true
 if allowed and shortOK
-    shortStop := close + atr * stopATR
-    shortTarget := close - (shortStop-close) * rewardR
-    strategy.entry("SHORT", strategy.short)
-    strategy.exit("SHORT EXIT", "SHORT", stop=shortStop, limit=shortTarget)
+    float riskAmt = strategy.equity * riskPct / 100
+    float stopDist = atr * stopATR
+    float qty = stopDist > 0 ? riskAmt / stopDist : na
+    shortStop := close + stopDist
+    shortTarget := close - (shortStop - close) * rewardR
+    strategy.entry("SHORT", strategy.short, qty=qty)
+    strategy.exit("SHORT 1R", "SHORT", qty_percent=partialPct, limit=close - (shortStop - close))
+    strategy.exit("SHORT 2R", "SHORT", stop=shortStop, limit=shortTarget)
+    entryBar := bar_index
     tradedToday := true
+
+// Time stop: on a 1-minute chart a 0DTE setup that goes nowhere is usually
+// wrong, and theta charges rent by the minute. Exit if still open after
+// timeStopMin bars.
+bool timeStopHit = strategy.position_size != 0 and not na(entryBar) and bar_index - entryBar >= timeStopMin
+if timeStopHit
+    strategy.close_all(comment="Time stop")
 
 // v2: FLAT BEFORE THE CLOSE. An intraday system must never hold overnight —
 // before this, a position whose stop/target were untouched was carried into

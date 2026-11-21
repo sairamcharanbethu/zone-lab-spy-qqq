@@ -15,6 +15,8 @@ bool requireVWAP = input.bool(true, "Require VWAP alignment")
 bool require5m = input.bool(true, "Require confirmed 5-minute trend")
 bool showDashboard = input.bool(true, "Show dashboard")
 string entrySession = input.session("0930-1530", "Entry window (New York)")
+int minScore = input.int(3, "Minimum confluence score (0-4)", minval=0, maxval=4)
+bool showLevels = input.bool(true, "Show stop/target of latest signal")
 
 bool inPM = not na(time(timeframe.period, pmSession, TZ))
 bool inEntryWindow = not na(time(timeframe.period, entrySession, TZ))
@@ -45,6 +47,15 @@ bool vwapShortOK = not requireVWAP or close < vwap
 bool trendLongOK = not require5m or trend5Up
 bool trendShortOK = not require5m or trend5Down
 bool volumeOK = rvol >= minRVOL
+
+// Confluence score (0-4): VWAP alignment, confirmed 5m trend, relative
+// volume, and a usable premarket range (not too small to matter, not so
+// large the move is already overextended). Signals below minScore are
+// skipped — fewer, better setups instead of more signals.
+float pmRange = na(pmHigh) or na(pmLow) ? na : pmHigh - pmLow
+bool pmRangeOK = not na(pmRange) and pmRange > atr * 1.5 and pmRange < atr * 8
+int scoreLong = (vwapLongOK ? 1 : 0) + (trendLongOK ? 1 : 0) + (volumeOK ? 1 : 0) + (pmRangeOK ? 1 : 0)
+int scoreShort = (vwapShortOK ? 1 : 0) + (trendShortOK ? 1 : 0) + (volumeOK ? 1 : 0) + (pmRangeOK ? 1 : 0)
 
 float body = math.max(math.abs(close-open), syminfo.mintick)
 float upperWick = high - math.max(open, close)
@@ -91,8 +102,28 @@ bool bearExhaustion = barRange > atr * 1.8 and close > high - barRange * 0.35 an
 
 // v2: signals only inside the entry window — no 15:59 entries with no time
 // left for the trade to work.
-bool longSignal = inEntryWindow and barstate.isconfirmed and (retestLong or failedPMLow or failedPDL) and volumeOK and vwapLongOK and trendLongOK
-bool shortSignal = inEntryWindow and barstate.isconfirmed and (retestShort or failedPMHigh or failedPDH) and volumeOK and vwapShortOK and trendShortOK
+bool longSignal = inEntryWindow and barstate.isconfirmed and scoreLong >= minScore and (retestLong or failedPMLow or failedPDL) and volumeOK and vwapLongOK and trendLongOK
+bool shortSignal = inEntryWindow and barstate.isconfirmed and scoreShort >= minScore and (retestShort or failedPMHigh or failedPDH) and volumeOK and vwapShortOK and trendShortOK
+
+// Stop/target of the latest signal, for the dashboard, levels and alerts.
+// For 0DTE use these underlying levels to pick the strike and to size the
+// option trade by premium risk — Pine cannot price the option itself.
+var float sigEntry = na
+var float sigStop = na
+var float sigTarget = na
+var int sigScore = na
+if longSignal
+    sigEntry := close
+    sigStop := close - atr * stopATR
+    sigTarget := close + (close - sigStop) * targetR
+    sigScore := scoreLong
+if shortSignal
+    sigEntry := close
+    sigStop := close + atr * stopATR
+    sigTarget := close - (sigStop - close) * targetR
+    sigScore := scoreShort
+plot(showLevels ? sigStop : na, "Latest stop", color=color.new(color.red, 0), style=plot.style_linebr)
+plot(showLevels ? sigTarget : na, "Latest target", color=color.new(color.green, 0), style=plot.style_linebr)
 
 plot(pmHigh, "Premarket High", color=color.lime, linewidth=2, style=plot.style_linebr)
 plot(pmLow, "Premarket Low", color=color.red, linewidth=2, style=plot.style_linebr)
@@ -107,7 +138,7 @@ plotshape(bearExhaustion, "Bear exhaustion proxy", shape.circle, location.belowb
 plotshape(bullReject, "Bullish wick", shape.triangleup, location.belowbar, color=color.new(color.lime, 35), size=size.tiny)
 plotshape(bearReject, "Bearish wick", shape.triangledown, location.abovebar, color=color.new(color.red, 35), size=size.tiny)
 
-var table dash = table.new(position.top_right, 2, 6, border_width=1)
+var table dash = table.new(position.top_right, 2, 9, border_width=1)
 if barstate.islast and showDashboard
     table.cell(dash, 0, 0, "ZONE LAB", text_color=color.white, bgcolor=color.rgb(35,40,50))
     table.cell(dash, 1, 0, syminfo.ticker, text_color=color.white, bgcolor=color.rgb(35,40,50))
@@ -121,6 +152,12 @@ if barstate.islast and showDashboard
     table.cell(dash, 1, 4, na(pmHigh) or na(pmLow) ? "N/A" : str.tostring(pmHigh-pmLow, format.mintick))
     table.cell(dash, 0, 5, "Signal")
     table.cell(dash, 1, 5, longSignal ? "LONG" : shortSignal ? "SHORT" : "WAIT", text_color=longSignal ? color.lime : shortSignal ? color.red : color.gray)
+    table.cell(dash, 0, 6, "Score")
+    table.cell(dash, 1, 6, na(sigScore) ? "N/A" : str.tostring(sigScore) + "/4")
+    table.cell(dash, 0, 7, "Stop")
+    table.cell(dash, 1, 7, na(sigStop) ? "N/A" : str.tostring(sigStop, format.mintick))
+    table.cell(dash, 0, 8, "Target")
+    table.cell(dash, 1, 8, na(sigTarget) ? "N/A" : str.tostring(sigTarget, format.mintick))
 
 // Warn instead of failing silently when premarket bars are missing
 // (extended-hours data off).
@@ -134,5 +171,11 @@ if not na(pmHigh) and not na(pmWarn)
 
 alertcondition(longSignal, "Zone Lab LONG", "Zone Lab confirmed LONG setup")
 alertcondition(shortSignal, "Zone Lab SHORT", "Zone Lab confirmed SHORT setup")
+// Dynamic alerts carry the full plan so no math is needed mid-trade.
+// 0DTE note: size by premium risk and exit options by 15:30 at the latest.
+if longSignal
+    alert("Zone Lab LONG " + syminfo.ticker + " | Entry " + str.tostring(sigEntry, format.mintick) + " | Stop " + str.tostring(sigStop, format.mintick) + " | Target " + str.tostring(sigTarget, format.mintick) + " | Score " + str.tostring(sigScore) + "/4 | 0DTE: size by premium risk, exit by 15:30", alert.freq_once_per_bar_close)
+if shortSignal
+    alert("Zone Lab SHORT " + syminfo.ticker + " | Entry " + str.tostring(sigEntry, format.mintick) + " | Stop " + str.tostring(sigStop, format.mintick) + " | Target " + str.tostring(sigTarget, format.mintick) + " | Score " + str.tostring(sigScore) + "/4 | 0DTE: size by premium risk, exit by 15:30", alert.freq_once_per_bar_close)
 alertcondition(failedPMHigh or failedPDH, "Failed high", "Price failed above a key high")
 alertcondition(failedPMLow or failedPDL, "Failed low", "Price failed below a key low")
