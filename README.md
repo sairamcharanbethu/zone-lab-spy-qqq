@@ -55,6 +55,10 @@ The system is now built around 0DTE options as the traded instrument. That chang
 
 Still to prove: full-history out-of-sample results (the Chart GT check ran only ~1 week / 4 trades), separate SPY vs QQQ performance, and paper-trading the option fills before any real capital.
 
+### v3.1 — zero-trade bug, found and fixed (2026-11-20)
+
+v3 compiled cleanly but produced **zero trades** on Nov 13–20, 2026, while v2 produced 4 on the same bars. A Chart GT diagnostic ruled out the two first suspects — the 14:00 entry cutoff and the daily-loss limit — because widening the window to 15:30 and disabling the loss limit still left 0 trades. The real cause was the new risk-based sizing: a 1-minute ATR stop is only ~$0.20–0.40, so $250 of risk divided by a $0.30 stop asks for ~833 shares, about $580k of notional on $25k of equity. Pine's broker emulator enforces the 100% margin limit and rejects oversized orders outright — every entry, silently. The fix caps quantity at what the equity can afford (`math.min(riskQty, equity / close)`, whole shares, minimum 1). Honest consequence: with $25k capital the backtest's risk per trade is capped well below the 1% setting — it measures R-multiples, not dollar risk. To model true 1% risk you would need either more capital or intraday margin (leverage), neither of which this backtest assumes.
+
 ## Validation checklist
 
 - Compile each script in TradingView Pine Editor (Pine Script v6).

@@ -9,6 +9,13 @@ strategy("Zone Lab — Intraday Signal Backtest", shorttitle="Zone Lab Test", ov
 // profitable underlying move does not guarantee a profitable 0DTE option.
 // Use it to validate signal timing/direction, then size 0DTE trades by
 // premium risk (see README).
+//
+// v3.1: risk-based qty is capped at what the equity can afford
+// (math.min(riskQty, equity / close)). Without the cap the 1-minute ATR
+// stop produced share counts the account could never buy, and the broker
+// emulator rejected every entry — v3 took zero trades on Nov 13-20, 2026
+// while v2 took 4. Risk per trade in this backtest is therefore capped
+// below riskPct; it measures R-multiples, not dollar risk.
 string TZ = "America/New_York"
 string pmSession = input.session("0400-0930", "Premarket (New York)")
 int retestBars = input.int(10, "Retest window", minval=1, maxval=40)
@@ -107,7 +114,16 @@ if strategy.position_size == 0
 if allowed and longOK
     float riskAmt = strategy.equity * riskPct / 100
     float stopDist = atr * stopATR
-    float qty = stopDist > 0 ? riskAmt / stopDist : na
+    float riskQty = stopDist > 0 ? riskAmt / stopDist : na
+    // FIX (v3.1): the 1-minute ATR stop is tiny in dollars, so raw risk
+    // sizing can ask for far more shares than the account can afford
+    // (e.g. $250 risk / $0.30 stop = ~833 shares ≈ $580k notional on
+    // $25k equity). The broker emulator rejects oversized orders
+    // outright — that is why v3 took zero trades. Cap the quantity at
+    // what the equity can actually buy. Consequence, stated honestly:
+    // with $25k capital the backtest's risk per trade is capped well
+    // below riskPct; it measures R-multiples, not dollar risk.
+    float qty = na(riskQty) ? na : math.max(math.floor(math.min(riskQty, strategy.equity / close)), 1)
     longStop := close - stopDist
     longTarget := close + (close - longStop) * rewardR
     strategy.entry("LONG", strategy.long, qty=qty)
@@ -119,7 +135,9 @@ if allowed and longOK
 if allowed and shortOK
     float riskAmt = strategy.equity * riskPct / 100
     float stopDist = atr * stopATR
-    float qty = stopDist > 0 ? riskAmt / stopDist : na
+    float riskQty = stopDist > 0 ? riskAmt / stopDist : na
+    // Same affordability cap as the long side (see note above).
+    float qty = na(riskQty) ? na : math.max(math.floor(math.min(riskQty, strategy.equity / close)), 1)
     shortStop := close + stopDist
     shortTarget := close - (shortStop - close) * rewardR
     strategy.entry("SHORT", strategy.short, qty=qty)
