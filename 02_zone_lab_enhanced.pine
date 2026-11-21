@@ -112,6 +112,13 @@ var float sigEntry = na
 var float sigStop = na
 var float sigTarget = na
 var int sigScore = na
+// FIX: levels belong to the latest signal — clear them each day so a
+// stop/target from earlier in the week never looks like a live level.
+if newDay
+    sigEntry := na
+    sigStop := na
+    sigTarget := na
+    sigScore := na
 if longSignal
     sigEntry := close
     sigStop := close - atr * stopATR
