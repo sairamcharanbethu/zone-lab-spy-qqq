@@ -17,8 +17,8 @@ bool showDashboard = input.bool(true, "Show dashboard")
 string entrySession = input.session("0930-1530", "Entry window (New York)")
 int minScore = input.int(3, "Minimum confluence score (0-4)", minval=0, maxval=4)
 bool showLevels = input.bool(true, "Show stop/target of latest signal")
-bool useFTFC = input.bool(true, "Require FTFC (5m/15m/60m/Daily all agree)")
-bool useInsideBar = input.bool(true, "Trade 2-1-2 inside-bar breaks")
+bool useFTFC = input.bool(false, "Require FTFC (5m/15m/60m/Daily all agree)")
+bool useInsideBar = input.bool(false, "Trade 2-1-2 inside-bar breaks")
 
 bool inPM = not na(time(timeframe.period, pmSession, TZ))
 bool inEntryWindow = not na(time(timeframe.period, entrySession, TZ))
@@ -50,7 +50,8 @@ bool trend5Down = close5 < ema5 and ema5 < ema5Prev
 // green = longs only; all four red = shorts only; mixed = no trade.
 // Hypothesis under test: the 6-month backtest's losing shorts (22% win
 // rate) were taken against higher-timeframe direction; FTFC should screen
-// out the worst of them. Toggle useFTFC off to A/B it.
+// out the worst of them. Both default OFF after v4 tested worse than v3.1
+// — toggle on to A/B them.
 [close15, open15] = request.security(syminfo.tickerid, "15", [close[1], open[1]], lookahead=barmerge.lookahead_on)
 [close60, open60] = request.security(syminfo.tickerid, "60", [close[1], open[1]], lookahead=barmerge.lookahead_on)
 [closeD, openD] = request.security(syminfo.tickerid, "D", [close[1], open[1]], lookahead=barmerge.lookahead_on)

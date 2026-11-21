@@ -69,6 +69,10 @@ Two ideas borrowed from the Stonkstradamus / The Strat indicator ([Stonkstradamu
 
 Test plan (same as v3.1): compile-check both files on Chart GT, Strategy Tester on Nov 13–20, 2026 (v3.1: 9 trades, +$59.89, PF 2.911), then the 6-month deep backtest (v3.1: −$86.96, PF 0.298 on regular-session-only data — see the caveat above). Note the deep run *can* test the 2-1-2 trigger fairly (it needs no premarket data), but still cannot test the premarket-retest signals. v4 is a hypothesis, not a fix — the numbers decide whether it stays.
 
+**v4 results (2026-11-20, Chart GT): both files compile clean; v4 is WORSE than v3.1 on both runs — the hypothesis failed.** Week Nov 13–20: 4 "trades" but really ONE short position (Nov 17, 10:32 @734.96), +$37.15 vs v3.1's +$59.89 on 9 trades; the 737.783 profit factor is an artifact of near-zero gross loss (−$0.05), not a real edge — the FTFC gate filtered the week down to a single position. 6-month deep (May 21–Nov 20): −$141.04, PF 0.080, win rate 18.75% (3/16), 12 positions vs v3.1's −$86.96, PF 0.298, 46.15%; longs 2/10 (v3.1: 4/4), shorts 1/6 (v3.1: 2/9); only June profitable; commission $58.95 vs gross profit $12.32. The 2-1-2 trigger added positions (12 vs 9) but most lost; the trade list does not label trigger type, so individual attribution is not possible. Verdict: FTFC + 2-1-2 do not improve the system as built. Open: A/B each toggle separately (FTFC-only, 2-1-2-only) on the deep test, or revert v4 defaults to off.
+
+**Revert (2026-11-20):** per the user's call, both v4 inputs now default to **off** in 02 and 03 (`useFTFC = false`, `useInsideBar = false`). With both off, the system behaves exactly as v3.1 — the v4 code stays in place, opt-in, for future A/B tests. The revert was verified on Chart GT by re-running the Nov 13–20 week test on the reverted files (see below).
+
 ## Validation checklist
 
 - Compile each script in TradingView Pine Editor (Pine Script v6).

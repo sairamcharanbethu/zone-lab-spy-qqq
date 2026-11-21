@@ -40,8 +40,8 @@ float riskPct = input.float(1.0, "Risk per trade (% of equity)", minval=0.1, max
 float maxDailyLossPct = input.float(2.0, "Max daily loss (% of equity)", minval=0.5, maxval=10.0, step=0.5)
 int timeStopMin = input.int(30, "Time stop (minutes in trade, 1m chart)", minval=5, maxval=120)
 int partialPct = input.int(50, "Scale out at 1R (% of position)", minval=10, maxval=90, step=10)
-bool useFTFC = input.bool(true, "Require FTFC (5m/15m/60m/Daily all agree)")
-bool useInsideBar = input.bool(true, "Trade 2-1-2 inside-bar breaks")
+bool useFTFC = input.bool(false, "Require FTFC (5m/15m/60m/Daily all agree)")
+bool useInsideBar = input.bool(false, "Trade 2-1-2 inside-bar breaks")
 
 bool inPM = not na(time(timeframe.period, pmSession, TZ))
 bool inEntryWindow = not na(time(timeframe.period, entrySession, TZ))
