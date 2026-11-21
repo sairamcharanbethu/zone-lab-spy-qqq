@@ -1,0 +1,82 @@
+//@version=6
+indicator("Zone Lab — Trade-the-Zones Style Replica", shorttitle="Zone Lab Replica", overlay=true, max_lines_count=200, max_labels_count=200, max_boxes_count=100)
+
+// Educational, independently implemented approximation of publicly described features.
+// Not affiliated with or copied from the paid Trade the Zones indicator.
+
+string TZ = "America/New_York"
+string pmSession = input.session("0400-0930", "Premarket session (New York)")
+bool showPM = input.bool(true, "Show premarket high/low")
+bool showPD = input.bool(true, "Show previous day high/low")
+bool showVWAP = input.bool(true, "Show regular-session VWAP")
+bool showSMA = input.bool(true, "Show 200 SMA")
+bool showWicks = input.bool(true, "Mark rejection candles")
+bool showSignals = input.bool(true, "Show breakout/retest signals")
+int retestBars = input.int(12, "Retest window (bars)", minval=1, maxval=50)
+float wickRatio = input.float(1.8, "Wick/body minimum ratio", minval=0.5, step=0.1)
+
+bool inPM = not na(time(timeframe.period, pmSession, TZ))
+bool newDay = ta.change(time("D", "0000-2359", TZ)) != 0
+var float pmHigh = na
+var float pmLow = na
+if newDay
+    pmHigh := na
+    pmLow := na
+if inPM
+    pmHigh := na(pmHigh) ? high : math.max(pmHigh, high)
+    pmLow := na(pmLow) ? low : math.min(pmLow, low)
+
+float pdh = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_on)
+float pdl = request.security(syminfo.tickerid, "D", low[1], lookahead=barmerge.lookahead_on)
+float sma200 = ta.sma(close, 200)
+float rthVwap = ta.vwap(hlc3)
+
+float body = math.max(math.abs(close-open), syminfo.mintick)
+float upperWick = high - math.max(open, close)
+float lowerWick = math.min(open, close) - low
+bool bearReject = upperWick / body >= wickRatio and close < open
+bool bullReject = lowerWick / body >= wickRatio and close > open
+
+// Break then retest state machine: signal only after a confirmed candle closes back
+// on the breakout side of the premarket level. This is a transparent approximation.
+var int longBreakBar = na
+var int shortBreakBar = na
+var bool longArmed = false
+var bool shortArmed = false
+bool breakUp = not na(pmHigh) and ta.crossover(close, pmHigh)
+bool breakDown = not na(pmLow) and ta.crossunder(close, pmLow)
+if breakUp
+    longArmed := true
+    longBreakBar := bar_index
+    shortArmed := false
+if breakDown
+    shortArmed := true
+    shortBreakBar := bar_index
+    longArmed := false
+if longArmed and (bar_index - longBreakBar > retestBars or close < pmHigh)
+    if close < pmHigh
+        longArmed := false
+bool longRetest = longArmed and bar_index > longBreakBar and low <= pmHigh and close > pmHigh and close > open
+if longRetest
+    longArmed := false
+if shortArmed and (bar_index - shortBreakBar > retestBars or close > pmLow)
+    if close > pmLow
+        shortArmed := false
+bool shortRetest = shortArmed and bar_index > shortBreakBar and high >= pmLow and close < pmLow and close < open
+if shortRetest
+    shortArmed := false
+
+plot(showPM ? pmHigh : na, "Premarket High", color=color.new(color.lime, 0), linewidth=2, style=plot.style_linebr)
+plot(showPM ? pmLow : na, "Premarket Low", color=color.new(color.red, 0), linewidth=2, style=plot.style_linebr)
+plot(showPD ? pdh : na, "Previous Day High", color=color.new(color.green, 45), style=plot.style_linebr)
+plot(showPD ? pdl : na, "Previous Day Low", color=color.new(color.red, 45), style=plot.style_linebr)
+plot(showVWAP ? rthVwap : na, "VWAP", color=color.orange, linewidth=2)
+plot(showSMA ? sma200 : na, "200 SMA", color=color.aqua, linewidth=2)
+plotshape(showWicks and bullReject, title="Bullish wick rejection", style=shape.triangleup, location=location.belowbar, color=color.lime, size=size.tiny, text="W+")
+plotshape(showWicks and bearReject, title="Bearish wick rejection", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.tiny, text="W-")
+plotshape(showSignals and longRetest, title="Long PM retest", style=shape.labelup, location=location.belowbar, color=color.green, textcolor=color.white, text="LONG")
+plotshape(showSignals and shortRetest, title="Short PM retest", style=shape.labeldown, location=location.abovebar, color=color.red, textcolor=color.white, text="SHORT")
+alertcondition(longRetest, "Long PMH retest", "Confirmed bullish retest of premarket high")
+alertcondition(shortRetest, "Short PML retest", "Confirmed bearish retest of premarket low")
+alertcondition(bullReject, "Bullish wick rejection", "Bullish wick rejection candle")
+alertcondition(bearReject, "Bearish wick rejection", "Bearish wick rejection candle")

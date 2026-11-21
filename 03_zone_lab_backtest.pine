@@ -1,0 +1,90 @@
+//@version=6
+strategy("Zone Lab — Intraday Signal Backtest", shorttitle="Zone Lab Test", overlay=true, initial_capital=25000, currency=currency.USD, default_qty_type=strategy.percent_of_equity, default_qty_value=10, pyramiding=0, commission_type=strategy.commission.percent, commission_value=0.01, slippage=1, process_orders_on_close=true)
+
+// Underlying-share proxy only. This does NOT model option premiums, IV, theta, bid/ask spreads,
+// assignment, contract selection, or 0DTE execution. Use it to test signal timing on SPY/QQQ only.
+string TZ = "America/New_York"
+string pmSession = input.session("0400-0930", "Premarket (New York)")
+int retestBars = input.int(10, "Retest window", minval=1, maxval=40)
+int volLen = input.int(20, "Volume average", minval=5)
+float minRVOL = input.float(1.2, "Minimum RVOL", minval=0.1, step=0.1)
+int atrLen = input.int(14, "ATR length", minval=2)
+float stopATR = input.float(1.0, "Stop ATR multiple", minval=0.2, step=0.1)
+float rewardR = input.float(2.0, "Target R multiple", minval=0.5, step=0.25)
+int startDate = input.time(timestamp("01 Jan 2023 00:00 -0500"), "Backtest start")
+int endDate = input.time(timestamp("31 Dec 2030 23:59 -0500"), "Backtest end")
+bool useVWAP = input.bool(true, "VWAP filter")
+bool use5m = input.bool(true, "Confirmed 5m trend filter")
+bool oneTradeDay = input.bool(true, "Maximum one entry per day")
+
+bool inPM = not na(time(timeframe.period, pmSession, TZ))
+bool newDay = ta.change(time("D", "0000-2359", TZ)) != 0
+var float pmHigh = na
+var float pmLow = na
+var bool tradedToday = false
+if newDay
+    pmHigh := na
+    pmLow := na
+    tradedToday := false
+if inPM
+    pmHigh := na(pmHigh) ? high : math.max(pmHigh, high)
+    pmLow := na(pmLow) ? low : math.min(pmLow, low)
+
+float vwap = ta.vwap(hlc3)
+float atr = ta.atr(atrLen)
+float volAvg = ta.sma(volume, volLen)
+float rvol = volAvg > 0 ? volume / volAvg : na
+[close5, ema5, ema5Prev] = request.security(syminfo.tickerid, "5", [close[1], ta.ema(close, 50)[1], ta.ema(close, 50)[2]], lookahead=barmerge.lookahead_on)
+bool longTrend = close5 > ema5 and ema5 > ema5Prev
+bool shortTrend = close5 < ema5 and ema5 < ema5Prev
+
+var int upBar = na
+var int downBar = na
+var bool upArmed = false
+var bool downArmed = false
+if not na(pmHigh) and ta.crossover(close, pmHigh)
+    upArmed := true
+    upBar := bar_index
+    downArmed := false
+if not na(pmLow) and ta.crossunder(close, pmLow)
+    downArmed := true
+    downBar := bar_index
+    upArmed := false
+if upArmed and (bar_index-upBar > retestBars or close < pmHigh)
+    upArmed := false
+if downArmed and (bar_index-downBar > retestBars or close > pmLow)
+    downArmed := false
+bool longRetest = upArmed and bar_index > upBar and low <= pmHigh and close > pmHigh and close > open
+bool shortRetest = downArmed and bar_index > downBar and high >= pmLow and close < pmLow and close < open
+if longRetest
+    upArmed := false
+if shortRetest
+    downArmed := false
+
+bool longOK = barstate.isconfirmed and longRetest and rvol >= minRVOL and (not useVWAP or close > vwap) and (not use5m or longTrend)
+bool shortOK = barstate.isconfirmed and shortRetest and rvol >= minRVOL and (not useVWAP or close < vwap) and (not use5m or shortTrend)
+bool inDateRange = time >= startDate and time <= endDate
+bool allowed = inDateRange and (not oneTradeDay or not tradedToday) and strategy.position_size == 0
+
+var float longStop = na
+var float longTarget = na
+var float shortStop = na
+var float shortTarget = na
+if allowed and longOK
+    longStop := close - atr * stopATR
+    longTarget := close + (close-longStop) * rewardR
+    strategy.entry("LONG", strategy.long)
+    strategy.exit("LONG EXIT", "LONG", stop=longStop, limit=longTarget)
+    tradedToday := true
+if allowed and shortOK
+    shortStop := close + atr * stopATR
+    shortTarget := close - (shortStop-close) * rewardR
+    strategy.entry("SHORT", strategy.short)
+    strategy.exit("SHORT EXIT", "SHORT", stop=shortStop, limit=shortTarget)
+    tradedToday := true
+
+plot(pmHigh, "PM High", color=color.lime, style=plot.style_linebr)
+plot(pmLow, "PM Low", color=color.red, style=plot.style_linebr)
+plot(vwap, "VWAP", color=color.orange)
+plot(strategy.position_size > 0 ? longStop : strategy.position_size < 0 ? shortStop : na, "Active stop", color=color.red, style=plot.style_linebr)
+plot(strategy.position_size > 0 ? longTarget : strategy.position_size < 0 ? shortTarget : na, "Active target", color=color.green, style=plot.style_linebr)

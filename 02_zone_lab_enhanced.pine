@@ -1,0 +1,124 @@
+//@version=6
+indicator("Zone Lab — Enhanced SPY/QQQ Intraday", shorttitle="Zone Lab Pro", overlay=true, max_lines_count=250, max_labels_count=250)
+
+// Enhanced rule-based system. Designed for 1-minute execution with confirmed 5-minute context.
+// Signals are confirmed at the close of the 1-minute bar; 5-minute filters use the last closed 5m bar.
+string TZ = "America/New_York"
+string pmSession = input.session("0400-0930", "Premarket (New York)")
+int volLen = input.int(20, "Relative volume lookback", minval=5)
+float minRVOL = input.float(1.2, "Minimum relative volume", minval=0.1, step=0.1)
+int atrLen = input.int(14, "ATR length", minval=2)
+float stopATR = input.float(1.0, "Stop distance (ATR)", minval=0.2, step=0.1)
+float targetR = input.float(2.0, "Target (R multiple)", minval=0.5, step=0.25)
+int retestBars = input.int(10, "Retest must occur within bars", minval=1, maxval=40)
+bool requireVWAP = input.bool(true, "Require VWAP alignment")
+bool require5m = input.bool(true, "Require confirmed 5-minute trend")
+bool showDashboard = input.bool(true, "Show dashboard")
+
+bool inPM = not na(time(timeframe.period, pmSession, TZ))
+bool newDay = ta.change(time("D", "0000-2359", TZ)) != 0
+var float pmHigh = na
+var float pmLow = na
+if newDay
+    pmHigh := na
+    pmLow := na
+if inPM
+    pmHigh := na(pmHigh) ? high : math.max(pmHigh, high)
+    pmLow := na(pmLow) ? low : math.min(pmLow, low)
+
+float pdh = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_on)
+float pdl = request.security(syminfo.tickerid, "D", low[1], lookahead=barmerge.lookahead_on)
+float vwap = ta.vwap(hlc3)
+float sma200 = ta.sma(close, 200)
+float atr = ta.atr(atrLen)
+float volAvg = ta.sma(volume, volLen)
+float rvol = volAvg > 0 ? volume / volAvg : na
+
+// Confirmed 5-minute values: previous completed 5m candle, avoiding intrabar repaint.
+[close5, ema5, ema5Prev] = request.security(syminfo.tickerid, "5", [close[1], ta.ema(close, 50)[1], ta.ema(close, 50)[2]], lookahead=barmerge.lookahead_on)
+bool trend5Up = close5 > ema5 and ema5 > ema5Prev
+bool trend5Down = close5 < ema5 and ema5 < ema5Prev
+bool vwapLongOK = not requireVWAP or close > vwap
+bool vwapShortOK = not requireVWAP or close < vwap
+bool trendLongOK = not require5m or trend5Up
+bool trendShortOK = not require5m or trend5Down
+bool volumeOK = rvol >= minRVOL
+
+float body = math.max(math.abs(close-open), syminfo.mintick)
+float upperWick = high - math.max(open, close)
+float lowerWick = math.min(open, close) - low
+bool bullReject = lowerWick / body >= 1.5 and close > open
+bool bearReject = upperWick / body >= 1.5 and close < open
+
+// Failed breakout: excursion beyond a reference level followed by a close back inside.
+bool failedPMHigh = not na(pmHigh) and high > pmHigh and close < pmHigh and close < open
+bool failedPMLow = not na(pmLow) and low < pmLow and close > pmLow and close > open
+bool failedPDH = high > pdh and close < pdh and close < open
+bool failedPDL = low < pdl and close > pdl and close > open
+
+// Break/retest state machine. Invalidated if price closes through the level before retest.
+var int upBar = na
+var int downBar = na
+var bool upArmed = false
+var bool downArmed = false
+bool upBreak = not na(pmHigh) and ta.crossover(close, pmHigh)
+bool downBreak = not na(pmLow) and ta.crossunder(close, pmLow)
+if upBreak
+    upArmed := true
+    upBar := bar_index
+    downArmed := false
+if downBreak
+    downArmed := true
+    downBar := bar_index
+    upArmed := false
+if upArmed and (bar_index - upBar > retestBars or close < pmHigh)
+    upArmed := false
+if downArmed and (bar_index - downBar > retestBars or close > pmLow)
+    downArmed := false
+bool retestLong = upArmed and bar_index > upBar and low <= pmHigh and close > pmHigh and close > open
+bool retestShort = downArmed and bar_index > downBar and high >= pmLow and close < pmLow and close < open
+if retestLong
+    upArmed := false
+if retestShort
+    downArmed := false
+
+// Exhaustion proxy: unusually large range with weaker close location and elevated volume.
+float barRange = math.max(high-low, syminfo.mintick)
+bool bullExhaustion = barRange > atr * 1.8 and close < low + barRange * 0.35 and rvol > 1.5
+bool bearExhaustion = barRange > atr * 1.8 and close > high - barRange * 0.35 and rvol > 1.5
+
+bool longSignal = barstate.isconfirmed and (retestLong or failedPMLow or failedPDL) and volumeOK and vwapLongOK and trendLongOK
+bool shortSignal = barstate.isconfirmed and (retestShort or failedPMHigh or failedPDH) and volumeOK and vwapShortOK and trendShortOK
+
+plot(pmHigh, "Premarket High", color=color.lime, linewidth=2, style=plot.style_linebr)
+plot(pmLow, "Premarket Low", color=color.red, linewidth=2, style=plot.style_linebr)
+plot(pdh, "Previous Day High", color=color.new(color.green, 55), style=plot.style_linebr)
+plot(pdl, "Previous Day Low", color=color.new(color.red, 55), style=plot.style_linebr)
+plot(vwap, "VWAP", color=color.orange, linewidth=2)
+plot(sma200, "200 SMA", color=color.aqua, linewidth=2)
+plotshape(longSignal, "Confirmed LONG", shape.labelup, location.belowbar, color=color.green, textcolor=color.white, text="LONG")
+plotshape(shortSignal, "Confirmed SHORT", shape.labeldown, location.abovebar, color=color.red, textcolor=color.white, text="SHORT")
+plotshape(bullExhaustion, "Bull exhaustion proxy", shape.circle, location.abovebar, color=color.new(color.orange, 0), size=size.tiny, text="EX")
+plotshape(bearExhaustion, "Bear exhaustion proxy", shape.circle, location.belowbar, color=color.new(color.orange, 0), size=size.tiny, text="EX")
+plotshape(bullReject, "Bullish wick", shape.triangleup, location.belowbar, color=color.new(color.lime, 35), size=size.tiny)
+plotshape(bearReject, "Bearish wick", shape.triangledown, location.abovebar, color=color.new(color.red, 35), size=size.tiny)
+
+var table dash = table.new(position.top_right, 2, 6, border_width=1)
+if barstate.islast and showDashboard
+    table.cell(dash, 0, 0, "ZONE LAB", text_color=color.white, bgcolor=color.rgb(35,40,50))
+    table.cell(dash, 1, 0, syminfo.ticker, text_color=color.white, bgcolor=color.rgb(35,40,50))
+    table.cell(dash, 0, 1, "5m trend")
+    table.cell(dash, 1, 1, trend5Up ? "BULL" : trend5Down ? "BEAR" : "NEUTRAL", text_color=trend5Up ? color.lime : trend5Down ? color.red : color.gray)
+    table.cell(dash, 0, 2, "VWAP")
+    table.cell(dash, 1, 2, close > vwap ? "ABOVE" : "BELOW", text_color=close > vwap ? color.lime : color.red)
+    table.cell(dash, 0, 3, "RVOL")
+    table.cell(dash, 1, 3, na(rvol) ? "N/A" : str.tostring(rvol, "#.##"))
+    table.cell(dash, 0, 4, "PM range")
+    table.cell(dash, 1, 4, na(pmHigh) or na(pmLow) ? "N/A" : str.tostring(pmHigh-pmLow, format.mintick))
+    table.cell(dash, 0, 5, "Signal")
+    table.cell(dash, 1, 5, longSignal ? "LONG" : shortSignal ? "SHORT" : "WAIT", text_color=longSignal ? color.lime : shortSignal ? color.red : color.gray)
+
+alertcondition(longSignal, "Zone Lab LONG", "Zone Lab confirmed LONG setup")
+alertcondition(shortSignal, "Zone Lab SHORT", "Zone Lab confirmed SHORT setup")
+alertcondition(failedPMHigh or failedPDH, "Failed high", "Price failed above a key high")
+alertcondition(failedPMLow or failedPDL, "Failed low", "Price failed below a key low")
