@@ -73,6 +73,22 @@ Test plan (same as v3.1): compile-check both files on Chart GT, Strategy Tester 
 
 **Revert (2026-11-20):** per the user's call, both v4 inputs now default to **off** in 02 and 03 (`useFTFC = false`, `useInsideBar = false`). With both off, the system behaves exactly as v3.1 — the v4 code stays in place, opt-in, for future A/B tests. Verified on Chart GT: the reverted files reproduce v3.1 exactly on Nov 13–20 — 9 trades, +$59.89, PF 2.911, max drawdown $31.18, win rate 66.67%, trade-for-trade identical.
 
+## v5 — 2-candle story bias + rubber-band trigger (2026-11-21)
+
+Two ideas from the Mathematical Indicator ([roan-maverick/tradingview-mathematical-indicator](https://github.com/roan-maverick/tradingview-mathematical-indicator), MIT, "story, zone, strat" session strategy), implemented independently in Zone Lab's own code — no code copied from that repo:
+
+- **Story bias (02 + 03, `useStoryBias`, default on):** yesterday's daily candle plus the last closed 4H candle. Both green = buy only, both red = sell only. Mixed follows the spec's "Tell the story" rule: at a daily ceiling (not floor) = sell only, at a daily floor (not ceiling) = buy only, otherwise the daily candle (flat daily → 4H). The bias is frozen at the first entry-window bar each day, as the spec freezes it at each session open, and it gates every signal. A Story row (BUY ONLY / SELL ONLY / NONE / OFF) was added to the indicator dashboard.
+- **Rubber-band trigger (02 + 03, `useRubberBand`, default on):** a range of candle bodies over the last 10 closed 1-minute bars, then one strong breakout candle that closes beyond it (body ≥ 50% of its own range, size ≤ 50% of the range height, ≥ 2 opposite candles inside the range), then a dip back — a wick ≥ 0.10 × ATR and ≥ 20% of its candle — and a fill when price retakes the breakout extreme within 6 bars. No dip before the break cancels the order ("nipple wick"); a close back inside the range or expiry cancels it too. Entries use defined risk (stop at the breakout candle's far side) and keep the existing 1R scale-out / 2R exit machinery. Breakout (BRK), dip (RB) and fill (RB diamond) markers are plotted on both files.
+- Both are toggleable inputs so each can be A/B tested against v3.1. The strategy (03) trades exactly the same signal set as the indicator (02).
+
+**Adaptations from the spec, stated plainly:** the spec searches k = 1..20 for the largest valid range — Zone Lab uses a fixed 10-bar lookback (`rbRangeBars`, tunable 3–20). The spec's daily ceiling/floor are body-based levels built from pivot patterns — Zone Lab uses PDH/PDL with a 0.25 × daily-ATR band. The weekly staircase tiebreaker is omitted (Zone Lab already has 5m trend + VWAP as structure filters). Clean zones, liquidity-grab labelling, and the "come back tomorrow" block are **not** ported — candidates for later A/B tests. The fill is exempt from the entry window (the breakout candle that placed the order was inside it; the fill may land up to 6 bars later). In the backtest the fill executes at the bar close (the spec's `max(open, order price)` fill price is not modelled).
+
+**Why the deep test is fairer for v5 than it was for v4:** neither new idea needs premarket data — the story bias reads daily/4H closes and the rubber band reads 1-minute bodies, both present in the regular-session-only 6-month history. So the deep run tests v5 properly, unlike the premarket-retest signals it still cannot test.
+
+Test plan (same as v3.1): compile-check both files on Chart GT, Strategy Tester on Nov 13–20, 2026 (v3.1: 9 trades, +$59.89, PF 2.911), then the 6-month deep backtest (v3.1: −$86.96, PF 0.298 on regular-session-only data). v5 is a hypothesis, not a fix — the numbers decide whether it stays.
+
+**v5 results (2026-11-21, Chart GT):** _to be filled in after the test runs._
+
 ## Validation checklist
 
 - Compile each script in TradingView Pine Editor (Pine Script v6).

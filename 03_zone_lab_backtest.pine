@@ -21,6 +21,13 @@ strategy("Zone Lab — Intraday Signal Backtest", shorttitle="Zone Lab Test", ov
 // entries use defined risk — stop at the other side of the inside bar,
 // target at the directional bar's extreme — instead of the ATR stop.
 // Both are toggleable inputs (useFTFC, useInsideBar) for A/B testing.
+// v5: 2-candle story bias (Mathematical Indicator) — yesterday's daily
+// candle + last closed 4H candle must agree, with the spec's "Tell the
+// story" tiebreakers when mixed — plus the rubber-band trigger (body
+// range, strong breakout candle, dip back, fill on retaking the breakout
+// extreme). Same adaptations and omissions as 02 (see its header);
+// entries use defined risk (stop at the breakout candle's far side) and
+// keep the existing 1R scale-out / 2R exit machinery.
 string TZ = "America/New_York"
 string pmSession = input.session("0400-0930", "Premarket (New York)")
 int retestBars = input.int(10, "Retest window", minval=1, maxval=40)
@@ -42,6 +49,10 @@ int timeStopMin = input.int(30, "Time stop (minutes in trade, 1m chart)", minval
 int partialPct = input.int(50, "Scale out at 1R (% of position)", minval=10, maxval=90, step=10)
 bool useFTFC = input.bool(false, "Require FTFC (5m/15m/60m/Daily all agree)")
 bool useInsideBar = input.bool(false, "Trade 2-1-2 inside-bar breaks")
+bool useStoryBias = input.bool(true, "Require 2-candle story bias (daily + 4H)")
+bool useRubberBand = input.bool(true, "Trade rubber-band breaks (Mathematical Indicator)")
+int rbRangeBars = input.int(10, "Rubber-band range lookback", minval=3, maxval=20)
+int rbExpiryBars = input.int(6, "Rubber-band order expiry (bars)", minval=1, maxval=30)
 
 bool inPM = not na(time(timeframe.period, pmSession, TZ))
 bool inEntryWindow = not na(time(timeframe.period, entrySession, TZ))
@@ -78,6 +89,45 @@ bool ftfcLong = not na(close5) and not na(open5) and not na(close15) and not na(
 bool ftfcShort = not na(close5) and not na(open5) and not na(close15) and not na(open15) and not na(close60) and not na(open60) and not na(closeD) and not na(openD) and close5 < open5 and close15 < open15 and close60 < open60 and closeD < openD
 bool ftfcLongOK = not useFTFC or ftfcLong
 bool ftfcShortOK = not useFTFC or ftfcShort
+
+// v5 — Story bias (Mathematical Indicator, spec §2), identical to the
+// indicator (02). The strategy must trade the SAME signal set as the
+// indicator — that mismatch bit v2.
+[close4h, open4h] = request.security(syminfo.tickerid, "240", [close[1], open[1]], lookahead=barmerge.lookahead_on)
+float dailyATR = request.security(syminfo.tickerid, "D", ta.atr(14)[1], lookahead=barmerge.lookahead_on)
+int dailyDir = na(closeD) or na(openD) ? 0 : closeD > openD ? 1 : closeD < openD ? -1 : 0
+int h4Dir = na(close4h) or na(open4h) ? 0 : close4h > open4h ? 1 : close4h < open4h ? -1 : 0
+bool atCeiling = not na(dailyATR) and not na(pdh) and close >= pdh - 0.25 * dailyATR
+bool atFloor = not na(dailyATR) and not na(pdl) and close <= pdl + 0.25 * dailyATR
+var int storyBias = 0
+var bool biasFrozen = false
+if newDay
+    biasFrozen := false
+    storyBias := 0
+if inEntryWindow and not biasFrozen and barstate.isconfirmed and useStoryBias
+    if dailyDir != 0 and dailyDir == h4Dir
+        storyBias := dailyDir
+    else if atCeiling and not atFloor
+        storyBias := -1
+    else if atFloor and not atCeiling
+        storyBias := 1
+    else if dailyDir != 0
+        storyBias := dailyDir
+    else
+        storyBias := h4Dir
+    biasFrozen := true
+bool storyLongOK = not useStoryBias or storyBias == 1
+bool storyShortOK = not useStoryBias or storyBias == -1
+
+// Daily loss limit: once the day is down maxDailyLossPct from the open,
+// no new entries. Prevents a bad day from becoming a revenge-trading day.
+// (Moved up from below the signal definitions so the rubber-band order
+// placement can use it too.)
+var float dayStartEquity = na
+if newDay
+    dayStartEquity := strategy.equity
+bool dailyLossOK = na(dayStartEquity) or strategy.equity > dayStartEquity * (1 - maxDailyLossPct / 100)
+bool inDateRange = time >= startDate and time <= endDate
 
 var int upBar = na
 var int downBar = na
@@ -117,16 +167,76 @@ bool c1Inside = high[1] <= high[2] and low[1] >= low[2]
 bool longInside = useInsideBar and c2Up and c1Inside and close > high[1] and close > open
 bool shortInside = useInsideBar and c2Down and c1Inside and close < low[1] and close < open
 
-bool longOK = inEntryWindow and barstate.isconfirmed and ftfcLongOK and (longRetest or failedPMLow or failedPDL or longInside) and rvol >= minRVOL and (not useVWAP or close > vwap) and (not use5m or longTrend)
-bool shortOK = inEntryWindow and barstate.isconfirmed and ftfcShortOK and (shortRetest or failedPMHigh or failedPDH or shortInside) and rvol >= minRVOL and (not useVWAP or close < vwap) and (not use5m or shortTrend)
-// Daily loss limit: once the day is down maxDailyLossPct from the open,
-// no new entries. Prevents a bad day from becoming a revenge-trading day.
-var float dayStartEquity = na
-if newDay
-    dayStartEquity := strategy.equity
-bool dailyLossOK = na(dayStartEquity) or strategy.equity > dayStartEquity * (1 - maxDailyLossPct / 100)
+// v5 — Rubber band (Mathematical Indicator, spec §5), identical to the
+// indicator (02). A working order is only placed when the strategy could
+// actually take the fill (flat, no trade taken today yet, inside the date
+// range, daily loss limit not hit), and it is cancelled the moment a
+// position opens another way or the day flattens — one trade at a time.
+float bodyTop = math.max(open, close)
+float bodyBot = math.min(open, close)
+float rbTop = ta.highest(bodyTop[1], rbRangeBars)
+float rbBot = ta.lowest(bodyBot[1], rbRangeBars)
+float rbHeight = rbTop - rbBot
+int rbOppLong = int(ta.sum(close[1] < open[1] ? 1.0 : 0.0, rbRangeBars))
+int rbOppShort = int(ta.sum(close[1] > open[1] ? 1.0 : 0.0, rbRangeBars))
+bool rbRangeOK = not na(rbHeight) and rbHeight >= atr * 0.5 and rbHeight <= atr * 4.0
+float candleRange = math.max(high - low, syminfo.mintick)
+float bodySize = math.abs(close - open)
+bool brkLong = barstate.isconfirmed and not na(rbTop) and close > rbTop and close > open and bodySize >= candleRange * 0.5 and candleRange <= rbHeight * 0.5 and rbRangeOK and rbOppLong >= 2
+bool brkShort = barstate.isconfirmed and not na(rbBot) and close < rbBot and close < open and bodySize >= candleRange * 0.5 and candleRange <= rbHeight * 0.5 and rbRangeOK and rbOppShort >= 2
+var bool rbOrder = false
+var int rbDir = 0
+var float rbOrderPrice = na
+var float rbStop = na
+var float rbRangeTop = na
+var float rbRangeBot = na
+var bool rbDip = false
+var int rbBreakBar = na
+bool rbDipEvent = false
+bool rbFillLong = false
+bool rbFillShort = false
+if strategy.position_size != 0 and rbOrder
+    rbOrder := false
+if eodFlat and rbOrder
+    rbOrder := false
+if barstate.isconfirmed and useRubberBand and not rbOrder and inEntryWindow and inDateRange and dailyLossOK and strategy.position_size == 0 and not tradedToday and ((brkLong and storyLongOK) or (brkShort and storyShortOK))
+    rbOrder := true
+    rbDir := brkLong ? 1 : -1
+    rbOrderPrice := brkLong ? high : low
+    rbStop := brkLong ? low : high
+    rbRangeTop := rbTop
+    rbRangeBot := rbBot
+    rbDip := false
+    rbBreakBar := bar_index
+if barstate.isconfirmed and rbOrder and bar_index > rbBreakBar
+    float wickL = math.min(open, close) - low
+    float wickS = high - math.max(open, close)
+    float wick = rbDir == 1 ? wickL : wickS
+    bool wickOK = wick >= atr * 0.10 and wick >= candleRange * 0.20
+    bool hit = rbDir == 1 ? high >= rbOrderPrice : low <= rbOrderPrice
+    if hit
+        if rbDip or (wickOK and (rbDir == 1 ? open < rbOrderPrice : open > rbOrderPrice))
+            if rbDir == 1
+                rbFillLong := true
+            else
+                rbFillShort := true
+            rbOrder := false
+        else
+            rbOrder := false
+    else
+        if wickOK and not rbDip
+            rbDip := true
+            rbDipEvent := true
+        bool backInside = rbDir == 1 ? close < rbRangeTop : close > rbRangeBot
+        if backInside or bar_index - rbBreakBar >= rbExpiryBars
+            rbOrder := false
 
-bool inDateRange = time >= startDate and time <= endDate
+// v5: the story bias gates every signal; the rubber-band fill is exempt
+// from the entry window (the breakout candle that placed the order was
+// inside it — the fill may land up to rbExpiryBars later).
+bool longOK = barstate.isconfirmed and ftfcLongOK and storyLongOK and ((inEntryWindow and (longRetest or failedPMLow or failedPDL or longInside)) or rbFillLong) and rvol >= minRVOL and (not useVWAP or close > vwap) and (not use5m or longTrend)
+bool shortOK = barstate.isconfirmed and ftfcShortOK and storyShortOK and ((inEntryWindow and (shortRetest or failedPMHigh or failedPDH or shortInside)) or rbFillShort) and rvol >= minRVOL and (not useVWAP or close < vwap) and (not use5m or shortTrend)
+
 bool allowed = inDateRange and dailyLossOK and (not oneTradeDay or not tradedToday) and strategy.position_size == 0
 
 var float longStop = na
@@ -140,7 +250,8 @@ if allowed and longOK
     float riskAmt = strategy.equity * riskPct / 100
     float atrStopDist = atr * stopATR
     // 2-1-2 entries risk to the other side of the inside bar, not the ATR stop.
-    float stopDist = longInside ? close - low[1] : atrStopDist
+    // Rubber-band entries risk to the breakout candle's far side.
+    float stopDist = longInside ? close - low[1] : rbFillLong ? close - rbStop : atrStopDist
     float riskQty = stopDist > 0 ? riskAmt / stopDist : na
     // FIX (v3.1): the 1-minute ATR stop is tiny in dollars, so raw risk
     // sizing can ask for far more shares than the account can afford
@@ -156,6 +267,10 @@ if allowed and longOK
         // target at the directional bar's high.
         longStop := low[1]
         longTarget := high[2]
+    else if rbFillLong
+        // Rubber-band defined risk: stop at the breakout candle's far side.
+        longStop := rbStop
+        longTarget := close + (close - longStop) * rewardR
     else
         longStop := close - stopDist
         longTarget := close + (close - longStop) * rewardR
@@ -169,7 +284,8 @@ if allowed and shortOK
     float riskAmt = strategy.equity * riskPct / 100
     float atrStopDist = atr * stopATR
     // 2-1-2 entries risk to the other side of the inside bar, not the ATR stop.
-    float stopDist = shortInside ? high[1] - close : atrStopDist
+    // Rubber-band entries risk to the breakout candle's far side.
+    float stopDist = shortInside ? high[1] - close : rbFillShort ? rbStop - close : atrStopDist
     float riskQty = stopDist > 0 ? riskAmt / stopDist : na
     // Same affordability cap as the long side (see note above).
     float qty = na(riskQty) ? na : math.max(math.floor(math.min(riskQty, strategy.equity / close)), 1)
@@ -178,6 +294,10 @@ if allowed and shortOK
         // target at the directional bar's low.
         shortStop := high[1]
         shortTarget := low[2]
+    else if rbFillShort
+        // Rubber-band defined risk: stop at the breakout candle's far side.
+        shortStop := rbStop
+        shortTarget := close - (shortStop - close) * rewardR
     else
         shortStop := close + stopDist
         shortTarget := close - (shortStop - close) * rewardR
@@ -203,5 +323,11 @@ if eodFlat and strategy.position_size != 0
 plot(pmHigh, "PM High", color=color.lime, style=plot.style_linebr)
 plot(pmLow, "PM Low", color=color.red, style=plot.style_linebr)
 plot(vwap, "VWAP", color=color.orange)
+plotshape(brkLong, "RB breakout LONG", shape.triangleup, location.belowbar, color=color.new(color.teal, 0), size=size.tiny, text="BRK")
+plotshape(brkShort, "RB breakout SHORT", shape.triangledown, location.abovebar, color=color.new(color.teal, 0), size=size.tiny, text="BRK")
+plotshape(rbDipEvent and rbDir == 1, "Rubber-band dip LONG", shape.circle, location.belowbar, color=color.new(color.yellow, 0), size=size.tiny, text="RB")
+plotshape(rbDipEvent and rbDir == -1, "Rubber-band dip SHORT", shape.circle, location.abovebar, color=color.new(color.yellow, 0), size=size.tiny, text="RB")
+plotshape(rbFillLong, "Rubber-band fill LONG", shape.diamond, location.belowbar, color=color.new(color.orange, 0), size=size.tiny, text="RB")
+plotshape(rbFillShort, "Rubber-band fill SHORT", shape.diamond, location.abovebar, color=color.new(color.orange, 0), size=size.tiny, text="RB")
 plot(strategy.position_size > 0 ? longStop : strategy.position_size < 0 ? shortStop : na, "Active stop", color=color.red, style=plot.style_linebr)
 plot(strategy.position_size > 0 ? longTarget : strategy.position_size < 0 ? shortTarget : na, "Active target", color=color.green, style=plot.style_linebr)

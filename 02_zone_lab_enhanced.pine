@@ -3,6 +3,16 @@ indicator("Zone Lab — Enhanced SPY/QQQ Intraday", shorttitle="Zone Lab Pro", o
 
 // Enhanced rule-based system. Designed for 1-minute execution with confirmed 5-minute context.
 // Signals are confirmed at the close of the 1-minute bar; 5-minute filters use the last closed 5m bar.
+// v5: 2-candle story bias (Mathematical Indicator) — yesterday's daily
+// candle + last closed 4H candle must agree for a directional bias, with
+// the spec's "Tell the story" tiebreakers (daily ceiling/floor, else the
+// daily candle) when mixed; bias frozen at the first entry-window bar
+// each day. Plus the rubber-band trigger: a body-based range, a strong
+// breakout candle, a dip back (qualifying wick), then a fill on retaking
+// the breakout extreme within 6 bars. Both toggleable (useStoryBias,
+// useRubberBand) for A/B testing. NOT ported from the spec: clean zones,
+// the weekly staircase tiebreaker, liquidity-grab labelling, and the
+// "come back tomorrow" block — candidates for later A/B tests.
 string TZ = "America/New_York"
 string pmSession = input.session("0400-0930", "Premarket (New York)")
 int volLen = input.int(20, "Relative volume lookback", minval=5)
@@ -19,6 +29,10 @@ int minScore = input.int(3, "Minimum confluence score (0-4)", minval=0, maxval=4
 bool showLevels = input.bool(true, "Show stop/target of latest signal")
 bool useFTFC = input.bool(false, "Require FTFC (5m/15m/60m/Daily all agree)")
 bool useInsideBar = input.bool(false, "Trade 2-1-2 inside-bar breaks")
+bool useStoryBias = input.bool(true, "Require 2-candle story bias (daily + 4H)")
+bool useRubberBand = input.bool(true, "Trade rubber-band breaks (Mathematical Indicator)")
+int rbRangeBars = input.int(10, "Rubber-band range lookback", minval=3, maxval=20)
+int rbExpiryBars = input.int(6, "Rubber-band order expiry (bars)", minval=1, maxval=30)
 
 bool inPM = not na(time(timeframe.period, pmSession, TZ))
 bool inEntryWindow = not na(time(timeframe.period, entrySession, TZ))
@@ -59,6 +73,42 @@ bool ftfcLong = not na(close5) and not na(open5) and not na(close15) and not na(
 bool ftfcShort = not na(close5) and not na(open5) and not na(close15) and not na(open15) and not na(close60) and not na(open60) and not na(closeD) and not na(openD) and close5 < open5 and close15 < open15 and close60 < open60 and closeD < openD
 bool ftfcLongOK = not useFTFC or ftfcLong
 bool ftfcShortOK = not useFTFC or ftfcShort
+
+// v5 — Story bias (Mathematical Indicator, spec §2): yesterday's daily
+// candle + the last closed 4H candle. Both green = BUY only, both red =
+// SELL only. Mixed ("Tell the story"): at a daily ceiling (not floor) =
+// SELL, at a daily floor (not ceiling) = BUY, otherwise the daily candle
+// (flat daily → 4H). Adaptations, stated plainly: the daily ceiling/floor
+// here are PDH/PDL with a 0.25 x daily-ATR band (the spec's body-based
+// daily levels are not built); the weekly staircase tiebreaker is omitted
+// (Zone Lab already has 5m trend + VWAP as structure filters). Bias is
+// frozen at the first entry-window bar each day, as the spec freezes it
+// at each session open.
+[close4h, open4h] = request.security(syminfo.tickerid, "240", [close[1], open[1]], lookahead=barmerge.lookahead_on)
+float dailyATR = request.security(syminfo.tickerid, "D", ta.atr(14)[1], lookahead=barmerge.lookahead_on)
+int dailyDir = na(closeD) or na(openD) ? 0 : closeD > openD ? 1 : closeD < openD ? -1 : 0
+int h4Dir = na(close4h) or na(open4h) ? 0 : close4h > open4h ? 1 : close4h < open4h ? -1 : 0
+bool atCeiling = not na(dailyATR) and not na(pdh) and close >= pdh - 0.25 * dailyATR
+bool atFloor = not na(dailyATR) and not na(pdl) and close <= pdl + 0.25 * dailyATR
+var int storyBias = 0
+var bool biasFrozen = false
+if newDay
+    biasFrozen := false
+    storyBias := 0
+if inEntryWindow and not biasFrozen and barstate.isconfirmed and useStoryBias
+    if dailyDir != 0 and dailyDir == h4Dir
+        storyBias := dailyDir
+    else if atCeiling and not atFloor
+        storyBias := -1
+    else if atFloor and not atCeiling
+        storyBias := 1
+    else if dailyDir != 0
+        storyBias := dailyDir
+    else
+        storyBias := h4Dir
+    biasFrozen := true
+bool storyLongOK = not useStoryBias or storyBias == 1
+bool storyShortOK = not useStoryBias or storyBias == -1
 bool vwapLongOK = not requireVWAP or close > vwap
 bool vwapShortOK = not requireVWAP or close < vwap
 bool trendLongOK = not require5m or trend5Up
@@ -122,6 +172,72 @@ bool c1Inside = high[1] <= high[2] and low[1] >= low[2]
 bool longInside = useInsideBar and c2Up and c1Inside and close > high[1] and close > open
 bool shortInside = useInsideBar and c2Down and c1Inside and close < low[1] and close < open
 
+// v5 — Rubber band (Mathematical Indicator, spec §5): a range of candle
+// bodies over the last rbRangeBars closed bars (the spec searches k = 1..20
+// for the largest valid range; fixed lookback here, stated plainly), a
+// strong breakout candle that closes beyond it (body >= 50% of its own
+// range, size <= 50% of the range height, >= 2 opposite candles inside),
+// then a dip back — a wick >= 0.10 x ATR and >= 20% of its candle — and
+// a fill when price retakes the breakout extreme within rbExpiryBars.
+// No dip before the break = cancel ("nipple wick"); close back inside
+// the range or expiry = cancel. Entry uses defined risk: stop at the
+// breakout candle's far side. Liquidity-grab labelling and the clean-zone
+// requirement from the spec are NOT ported (see header).
+float bodyTop = math.max(open, close)
+float bodyBot = math.min(open, close)
+float rbTop = ta.highest(bodyTop[1], rbRangeBars)
+float rbBot = ta.lowest(bodyBot[1], rbRangeBars)
+float rbHeight = rbTop - rbBot
+int rbOppLong = int(ta.sum(close[1] < open[1] ? 1.0 : 0.0, rbRangeBars))
+int rbOppShort = int(ta.sum(close[1] > open[1] ? 1.0 : 0.0, rbRangeBars))
+bool rbRangeOK = not na(rbHeight) and rbHeight >= atr * 0.5 and rbHeight <= atr * 4.0
+float candleRange = math.max(high - low, syminfo.mintick)
+float bodySize = math.abs(close - open)
+bool brkLong = barstate.isconfirmed and not na(rbTop) and close > rbTop and close > open and bodySize >= candleRange * 0.5 and candleRange <= rbHeight * 0.5 and rbRangeOK and rbOppLong >= 2
+bool brkShort = barstate.isconfirmed and not na(rbBot) and close < rbBot and close < open and bodySize >= candleRange * 0.5 and candleRange <= rbHeight * 0.5 and rbRangeOK and rbOppShort >= 2
+var bool rbOrder = false
+var int rbDir = 0
+var float rbOrderPrice = na
+var float rbStop = na
+var float rbRangeTop = na
+var float rbRangeBot = na
+var bool rbDip = false
+var int rbBreakBar = na
+bool rbDipEvent = false
+bool rbFillLong = false
+bool rbFillShort = false
+if barstate.isconfirmed and useRubberBand and not rbOrder and inEntryWindow and ((brkLong and storyLongOK) or (brkShort and storyShortOK))
+    rbOrder := true
+    rbDir := brkLong ? 1 : -1
+    rbOrderPrice := brkLong ? high : low
+    rbStop := brkLong ? low : high
+    rbRangeTop := rbTop
+    rbRangeBot := rbBot
+    rbDip := false
+    rbBreakBar := bar_index
+if barstate.isconfirmed and rbOrder and bar_index > rbBreakBar
+    float wickL = math.min(open, close) - low
+    float wickS = high - math.max(open, close)
+    float wick = rbDir == 1 ? wickL : wickS
+    bool wickOK = wick >= atr * 0.10 and wick >= candleRange * 0.20
+    bool hit = rbDir == 1 ? high >= rbOrderPrice : low <= rbOrderPrice
+    if hit
+        if rbDip or (wickOK and (rbDir == 1 ? open < rbOrderPrice : open > rbOrderPrice))
+            if rbDir == 1
+                rbFillLong := true
+            else
+                rbFillShort := true
+            rbOrder := false
+        else
+            rbOrder := false
+    else
+        if wickOK and not rbDip
+            rbDip := true
+            rbDipEvent := true
+        bool backInside = rbDir == 1 ? close < rbRangeTop : close > rbRangeBot
+        if backInside or bar_index - rbBreakBar >= rbExpiryBars
+            rbOrder := false
+
 // Exhaustion proxy: unusually large range with weaker close location and elevated volume.
 float barRange = math.max(high-low, syminfo.mintick)
 bool bullExhaustion = barRange > atr * 1.8 and close < low + barRange * 0.35 and rvol > 1.5
@@ -131,8 +247,12 @@ bool bearExhaustion = barRange > atr * 1.8 and close > high - barRange * 0.35 an
 // left for the trade to work.
 // v4: FTFC gate on every signal + 2-1-2 inside-bar breaks as an extra
 // trigger alongside retests and failed breakouts.
-bool longSignal = inEntryWindow and barstate.isconfirmed and ftfcLongOK and scoreLong >= minScore and (retestLong or failedPMLow or failedPDL or longInside) and volumeOK and vwapLongOK and trendLongOK
-bool shortSignal = inEntryWindow and barstate.isconfirmed and ftfcShortOK and scoreShort >= minScore and (retestShort or failedPMHigh or failedPDH or shortInside) and volumeOK and vwapShortOK and trendShortOK
+// v5: story-bias gate on every signal; rubber-band fill added as a trigger.
+// The fill is exempt from the entry window (the breakout candle that
+// placed the order was inside it — the fill may land up to rbExpiryBars
+// later).
+bool longSignal = barstate.isconfirmed and ftfcLongOK and storyLongOK and scoreLong >= minScore and ((inEntryWindow and (retestLong or failedPMLow or failedPDL or longInside)) or rbFillLong) and volumeOK and vwapLongOK and trendLongOK
+bool shortSignal = barstate.isconfirmed and ftfcShortOK and storyShortOK and scoreShort >= minScore and ((inEntryWindow and (retestShort or failedPMHigh or failedPDH or shortInside)) or rbFillShort) and volumeOK and vwapShortOK and trendShortOK
 
 // Stop/target of the latest signal, for the dashboard, levels and alerts.
 // For 0DTE use these underlying levels to pick the strike and to size the
@@ -155,6 +275,10 @@ if longSignal
         // target at the directional bar's high.
         sigStop := low[1]
         sigTarget := high[2]
+    else if rbFillLong
+        // Rubber-band defined risk: stop at the breakout candle's far side.
+        sigStop := rbStop
+        sigTarget := close + (close - sigStop) * targetR
     else
         sigStop := close - atr * stopATR
         sigTarget := close + (close - sigStop) * targetR
@@ -164,6 +288,10 @@ if shortSignal
     if shortInside
         sigStop := high[1]
         sigTarget := low[2]
+    else if rbFillShort
+        // Rubber-band defined risk: stop at the breakout candle's far side.
+        sigStop := rbStop
+        sigTarget := close - (sigStop - close) * targetR
     else
         sigStop := close + atr * stopATR
         sigTarget := close - (sigStop - close) * targetR
@@ -181,12 +309,18 @@ plotshape(longSignal, "Confirmed LONG", shape.labelup, location.belowbar, color=
 plotshape(shortSignal, "Confirmed SHORT", shape.labeldown, location.abovebar, color=color.red, textcolor=color.white, text="SHORT")
 plotshape(longSignal and longInside, "2-1-2 LONG", shape.diamond, location.belowbar, color=color.new(color.teal, 0), size=size.tiny, text="2-1-2")
 plotshape(shortSignal and shortInside, "2-1-2 SHORT", shape.diamond, location.abovebar, color=color.new(color.purple, 0), size=size.tiny, text="2-1-2")
+plotshape(brkLong, "RB breakout LONG", shape.triangleup, location.belowbar, color=color.new(color.teal, 0), size=size.tiny, text="BRK")
+plotshape(brkShort, "RB breakout SHORT", shape.triangledown, location.abovebar, color=color.new(color.teal, 0), size=size.tiny, text="BRK")
+plotshape(rbDipEvent and rbDir == 1, "Rubber-band dip LONG", shape.circle, location.belowbar, color=color.new(color.yellow, 0), size=size.tiny, text="RB")
+plotshape(rbDipEvent and rbDir == -1, "Rubber-band dip SHORT", shape.circle, location.abovebar, color=color.new(color.yellow, 0), size=size.tiny, text="RB")
+plotshape(longSignal and rbFillLong, "Rubber-band LONG", shape.diamond, location.belowbar, color=color.new(color.orange, 0), size=size.tiny, text="RB")
+plotshape(shortSignal and rbFillShort, "Rubber-band SHORT", shape.diamond, location.abovebar, color=color.new(color.orange, 0), size=size.tiny, text="RB")
 plotshape(bullExhaustion, "Bull exhaustion proxy", shape.circle, location.abovebar, color=color.new(color.orange, 0), size=size.tiny, text="EX")
 plotshape(bearExhaustion, "Bear exhaustion proxy", shape.circle, location.belowbar, color=color.new(color.orange, 0), size=size.tiny, text="EX")
 plotshape(bullReject, "Bullish wick", shape.triangleup, location.belowbar, color=color.new(color.lime, 35), size=size.tiny)
 plotshape(bearReject, "Bearish wick", shape.triangledown, location.abovebar, color=color.new(color.red, 35), size=size.tiny)
 
-var table dash = table.new(position.top_right, 2, 10, border_width=1)
+var table dash = table.new(position.top_right, 2, 11, border_width=1)
 if barstate.islast and showDashboard
     table.cell(dash, 0, 0, "ZONE LAB", text_color=color.white, bgcolor=color.rgb(35,40,50))
     table.cell(dash, 1, 0, syminfo.ticker, text_color=color.white, bgcolor=color.rgb(35,40,50))
@@ -208,6 +342,8 @@ if barstate.islast and showDashboard
     table.cell(dash, 1, 8, na(sigTarget) ? "N/A" : str.tostring(sigTarget, format.mintick))
     table.cell(dash, 0, 9, "FTFC")
     table.cell(dash, 1, 9, ftfcLong ? "BULL" : ftfcShort ? "BEAR" : "MIXED", text_color=ftfcLong ? color.lime : ftfcShort ? color.red : color.gray)
+    table.cell(dash, 0, 10, "Story")
+    table.cell(dash, 1, 10, not useStoryBias ? "OFF" : storyBias == 1 ? "BUY ONLY" : storyBias == -1 ? "SELL ONLY" : "NONE", text_color=not useStoryBias ? color.gray : storyBias == 1 ? color.lime : storyBias == -1 ? color.red : color.gray)
 
 // Warn instead of failing silently when premarket bars are missing
 // (extended-hours data off).
@@ -224,8 +360,8 @@ alertcondition(shortSignal, "Zone Lab SHORT", "Zone Lab confirmed SHORT setup")
 // Dynamic alerts carry the full plan so no math is needed mid-trade.
 // 0DTE note: size by premium risk and exit options by 15:30 at the latest.
 if longSignal
-    alert("Zone Lab LONG " + syminfo.ticker + " | Entry " + str.tostring(sigEntry, format.mintick) + " | Stop " + str.tostring(sigStop, format.mintick) + " | Target " + str.tostring(sigTarget, format.mintick) + " | Score " + str.tostring(sigScore) + "/4" + (longInside ? " | 2-1-2" : "") + " | 0DTE: size by premium risk, exit by 15:30", alert.freq_once_per_bar_close)
+    alert("Zone Lab LONG " + syminfo.ticker + " | Entry " + str.tostring(sigEntry, format.mintick) + " | Stop " + str.tostring(sigStop, format.mintick) + " | Target " + str.tostring(sigTarget, format.mintick) + " | Score " + str.tostring(sigScore) + "/4" + (longInside ? " | 2-1-2" : "") + (rbFillLong ? " | RB" : "") + " | 0DTE: size by premium risk, exit by 15:30", alert.freq_once_per_bar_close)
 if shortSignal
-    alert("Zone Lab SHORT " + syminfo.ticker + " | Entry " + str.tostring(sigEntry, format.mintick) + " | Stop " + str.tostring(sigStop, format.mintick) + " | Target " + str.tostring(sigTarget, format.mintick) + " | Score " + str.tostring(sigScore) + "/4" + (shortInside ? " | 2-1-2" : "") + " | 0DTE: size by premium risk, exit by 15:30", alert.freq_once_per_bar_close)
+    alert("Zone Lab SHORT " + syminfo.ticker + " | Entry " + str.tostring(sigEntry, format.mintick) + " | Stop " + str.tostring(sigStop, format.mintick) + " | Target " + str.tostring(sigTarget, format.mintick) + " | Score " + str.tostring(sigScore) + "/4" + (shortInside ? " | 2-1-2" : "") + (rbFillShort ? " | RB" : "") + " | 0DTE: size by premium risk, exit by 15:30", alert.freq_once_per_bar_close)
 alertcondition(failedPMHigh or failedPDH, "Failed high", "Price failed above a key high")
 alertcondition(failedPMLow or failedPDL, "Failed low", "Price failed below a key low")
