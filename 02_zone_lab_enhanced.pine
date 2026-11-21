@@ -17,6 +17,8 @@ bool showDashboard = input.bool(true, "Show dashboard")
 string entrySession = input.session("0930-1530", "Entry window (New York)")
 int minScore = input.int(3, "Minimum confluence score (0-4)", minval=0, maxval=4)
 bool showLevels = input.bool(true, "Show stop/target of latest signal")
+bool useFTFC = input.bool(true, "Require FTFC (5m/15m/60m/Daily all agree)")
+bool useInsideBar = input.bool(true, "Trade 2-1-2 inside-bar breaks")
 
 bool inPM = not na(time(timeframe.period, pmSession, TZ))
 bool inEntryWindow = not na(time(timeframe.period, entrySession, TZ))
@@ -39,9 +41,23 @@ float volAvg = ta.sma(volume, volLen)
 float rvol = volAvg > 0 ? volume / volAvg : na
 
 // Confirmed 5-minute values: previous completed 5m candle, avoiding intrabar repaint.
-[close5, ema5, ema5Prev] = request.security(syminfo.tickerid, "5", [close[1], ta.ema(close, 50)[1], ta.ema(close, 50)[2]], lookahead=barmerge.lookahead_on)
+[close5, ema5, ema5Prev, open5] = request.security(syminfo.tickerid, "5", [close[1], ta.ema(close, 50)[1], ta.ema(close, 50)[2], open[1]], lookahead=barmerge.lookahead_on)
 bool trend5Up = close5 > ema5 and ema5 > ema5Prev
 bool trend5Down = close5 < ema5 and ema5 < ema5Prev
+
+// v4 — FTFC (Full Time Frame Continuity, from The Strat): the last closed
+// candle on 5m, 15m, 60m and Daily must all point the same way. All four
+// green = longs only; all four red = shorts only; mixed = no trade.
+// Hypothesis under test: the 6-month backtest's losing shorts (22% win
+// rate) were taken against higher-timeframe direction; FTFC should screen
+// out the worst of them. Toggle useFTFC off to A/B it.
+[close15, open15] = request.security(syminfo.tickerid, "15", [close[1], open[1]], lookahead=barmerge.lookahead_on)
+[close60, open60] = request.security(syminfo.tickerid, "60", [close[1], open[1]], lookahead=barmerge.lookahead_on)
+[closeD, openD] = request.security(syminfo.tickerid, "D", [close[1], open[1]], lookahead=barmerge.lookahead_on)
+bool ftfcLong = not na(close5) and not na(open5) and not na(close15) and not na(open15) and not na(close60) and not na(open60) and not na(closeD) and not na(openD) and close5 > open5 and close15 > open15 and close60 > open60 and closeD > openD
+bool ftfcShort = not na(close5) and not na(open5) and not na(close15) and not na(open15) and not na(close60) and not na(open60) and not na(closeD) and not na(openD) and close5 < open5 and close15 < open15 and close60 < open60 and closeD < openD
+bool ftfcLongOK = not useFTFC or ftfcLong
+bool ftfcShortOK = not useFTFC or ftfcShort
 bool vwapLongOK = not requireVWAP or close > vwap
 bool vwapShortOK = not requireVWAP or close < vwap
 bool trendLongOK = not require5m or trend5Up
@@ -95,6 +111,16 @@ if retestLong
 if retestShort
     downArmed := false
 
+// v4 — 2-1-2 inside-bar break (The Strat): a directional bar, then an
+// inside bar (the pause), then a break of the inside bar. Entry on the
+// break, stop at the other side of the inside bar, target at the
+// directional bar's extreme. C2 = bar[2], C1 = bar[1], CC = current bar.
+bool c2Up = high[2] > high[3] and low[2] >= low[3] and close[2] > open[2]
+bool c2Down = low[2] < low[3] and high[2] <= high[3] and close[2] < open[2]
+bool c1Inside = high[1] <= high[2] and low[1] >= low[2]
+bool longInside = useInsideBar and c2Up and c1Inside and close > high[1] and close > open
+bool shortInside = useInsideBar and c2Down and c1Inside and close < low[1] and close < open
+
 // Exhaustion proxy: unusually large range with weaker close location and elevated volume.
 float barRange = math.max(high-low, syminfo.mintick)
 bool bullExhaustion = barRange > atr * 1.8 and close < low + barRange * 0.35 and rvol > 1.5
@@ -102,8 +128,10 @@ bool bearExhaustion = barRange > atr * 1.8 and close > high - barRange * 0.35 an
 
 // v2: signals only inside the entry window — no 15:59 entries with no time
 // left for the trade to work.
-bool longSignal = inEntryWindow and barstate.isconfirmed and scoreLong >= minScore and (retestLong or failedPMLow or failedPDL) and volumeOK and vwapLongOK and trendLongOK
-bool shortSignal = inEntryWindow and barstate.isconfirmed and scoreShort >= minScore and (retestShort or failedPMHigh or failedPDH) and volumeOK and vwapShortOK and trendShortOK
+// v4: FTFC gate on every signal + 2-1-2 inside-bar breaks as an extra
+// trigger alongside retests and failed breakouts.
+bool longSignal = inEntryWindow and barstate.isconfirmed and ftfcLongOK and scoreLong >= minScore and (retestLong or failedPMLow or failedPDL or longInside) and volumeOK and vwapLongOK and trendLongOK
+bool shortSignal = inEntryWindow and barstate.isconfirmed and ftfcShortOK and scoreShort >= minScore and (retestShort or failedPMHigh or failedPDH or shortInside) and volumeOK and vwapShortOK and trendShortOK
 
 // Stop/target of the latest signal, for the dashboard, levels and alerts.
 // For 0DTE use these underlying levels to pick the strike and to size the
@@ -121,13 +149,23 @@ if newDay
     sigScore := na
 if longSignal
     sigEntry := close
-    sigStop := close - atr * stopATR
-    sigTarget := close + (close - sigStop) * targetR
+    if longInside
+        // 2-1-2 defined risk: stop at the other side of the inside bar,
+        // target at the directional bar's high.
+        sigStop := low[1]
+        sigTarget := high[2]
+    else
+        sigStop := close - atr * stopATR
+        sigTarget := close + (close - sigStop) * targetR
     sigScore := scoreLong
 if shortSignal
     sigEntry := close
-    sigStop := close + atr * stopATR
-    sigTarget := close - (sigStop - close) * targetR
+    if shortInside
+        sigStop := high[1]
+        sigTarget := low[2]
+    else
+        sigStop := close + atr * stopATR
+        sigTarget := close - (sigStop - close) * targetR
     sigScore := scoreShort
 plot(showLevels ? sigStop : na, "Latest stop", color=color.new(color.red, 0), style=plot.style_linebr)
 plot(showLevels ? sigTarget : na, "Latest target", color=color.new(color.green, 0), style=plot.style_linebr)
@@ -140,12 +178,14 @@ plot(vwap, "VWAP", color=color.orange, linewidth=2)
 plot(sma200, "200 SMA", color=color.aqua, linewidth=2)
 plotshape(longSignal, "Confirmed LONG", shape.labelup, location.belowbar, color=color.green, textcolor=color.white, text="LONG")
 plotshape(shortSignal, "Confirmed SHORT", shape.labeldown, location.abovebar, color=color.red, textcolor=color.white, text="SHORT")
+plotshape(longSignal and longInside, "2-1-2 LONG", shape.diamond, location.belowbar, color=color.new(color.teal, 0), size=size.tiny, text="2-1-2")
+plotshape(shortSignal and shortInside, "2-1-2 SHORT", shape.diamond, location.abovebar, color=color.new(color.purple, 0), size=size.tiny, text="2-1-2")
 plotshape(bullExhaustion, "Bull exhaustion proxy", shape.circle, location.abovebar, color=color.new(color.orange, 0), size=size.tiny, text="EX")
 plotshape(bearExhaustion, "Bear exhaustion proxy", shape.circle, location.belowbar, color=color.new(color.orange, 0), size=size.tiny, text="EX")
 plotshape(bullReject, "Bullish wick", shape.triangleup, location.belowbar, color=color.new(color.lime, 35), size=size.tiny)
 plotshape(bearReject, "Bearish wick", shape.triangledown, location.abovebar, color=color.new(color.red, 35), size=size.tiny)
 
-var table dash = table.new(position.top_right, 2, 9, border_width=1)
+var table dash = table.new(position.top_right, 2, 10, border_width=1)
 if barstate.islast and showDashboard
     table.cell(dash, 0, 0, "ZONE LAB", text_color=color.white, bgcolor=color.rgb(35,40,50))
     table.cell(dash, 1, 0, syminfo.ticker, text_color=color.white, bgcolor=color.rgb(35,40,50))
@@ -165,6 +205,8 @@ if barstate.islast and showDashboard
     table.cell(dash, 1, 7, na(sigStop) ? "N/A" : str.tostring(sigStop, format.mintick))
     table.cell(dash, 0, 8, "Target")
     table.cell(dash, 1, 8, na(sigTarget) ? "N/A" : str.tostring(sigTarget, format.mintick))
+    table.cell(dash, 0, 9, "FTFC")
+    table.cell(dash, 1, 9, ftfcLong ? "BULL" : ftfcShort ? "BEAR" : "MIXED", text_color=ftfcLong ? color.lime : ftfcShort ? color.red : color.gray)
 
 // Warn instead of failing silently when premarket bars are missing
 // (extended-hours data off).
@@ -181,8 +223,8 @@ alertcondition(shortSignal, "Zone Lab SHORT", "Zone Lab confirmed SHORT setup")
 // Dynamic alerts carry the full plan so no math is needed mid-trade.
 // 0DTE note: size by premium risk and exit options by 15:30 at the latest.
 if longSignal
-    alert("Zone Lab LONG " + syminfo.ticker + " | Entry " + str.tostring(sigEntry, format.mintick) + " | Stop " + str.tostring(sigStop, format.mintick) + " | Target " + str.tostring(sigTarget, format.mintick) + " | Score " + str.tostring(sigScore) + "/4 | 0DTE: size by premium risk, exit by 15:30", alert.freq_once_per_bar_close)
+    alert("Zone Lab LONG " + syminfo.ticker + " | Entry " + str.tostring(sigEntry, format.mintick) + " | Stop " + str.tostring(sigStop, format.mintick) + " | Target " + str.tostring(sigTarget, format.mintick) + " | Score " + str.tostring(sigScore) + "/4" + (longInside ? " | 2-1-2" : "") + " | 0DTE: size by premium risk, exit by 15:30", alert.freq_once_per_bar_close)
 if shortSignal
-    alert("Zone Lab SHORT " + syminfo.ticker + " | Entry " + str.tostring(sigEntry, format.mintick) + " | Stop " + str.tostring(sigStop, format.mintick) + " | Target " + str.tostring(sigTarget, format.mintick) + " | Score " + str.tostring(sigScore) + "/4 | 0DTE: size by premium risk, exit by 15:30", alert.freq_once_per_bar_close)
+    alert("Zone Lab SHORT " + syminfo.ticker + " | Entry " + str.tostring(sigEntry, format.mintick) + " | Stop " + str.tostring(sigStop, format.mintick) + " | Target " + str.tostring(sigTarget, format.mintick) + " | Score " + str.tostring(sigScore) + "/4" + (shortInside ? " | 2-1-2" : "") + " | 0DTE: size by premium risk, exit by 15:30", alert.freq_once_per_bar_close)
 alertcondition(failedPMHigh or failedPDH, "Failed high", "Price failed above a key high")
 alertcondition(failedPMLow or failedPDL, "Failed low", "Price failed below a key low")

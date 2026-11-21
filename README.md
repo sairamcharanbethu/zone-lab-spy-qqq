@@ -59,6 +59,16 @@ Still to prove: full-history out-of-sample results (the Chart GT check ran only 
 
 v3 compiled cleanly but produced **zero trades** on Nov 13–20, 2026, while v2 produced 4 on the same bars. A Chart GT diagnostic ruled out the two first suspects — the 14:00 entry cutoff and the daily-loss limit — because widening the window to 15:30 and disabling the loss limit still left 0 trades. The real cause was the new risk-based sizing: a 1-minute ATR stop is only ~$0.20–0.40, so $250 of risk divided by a $0.30 stop asks for ~833 shares, about $580k of notional on $25k of equity. Pine's broker emulator enforces the 100% margin limit and rejects oversized orders outright — every entry, silently. The fix caps quantity at what the equity can afford (`math.min(riskQty, equity / close)`, whole shares, minimum 1). Honest consequence: with $25k capital the backtest's risk per trade is capped well below the 1% setting — it measures R-multiples, not dollar risk. To model true 1% risk you would need either more capital or intraday margin (leverage), neither of which this backtest assumes.
 
+## v4 — FTFC + 2-1-2 inside bars (2026-11-20)
+
+Two ideas borrowed from the Stonkstradamus / The Strat indicator ([Stonkstradamus + Inside Bar Pro + FTFC](https://www.tradingview.com/script/UwfCjqZI-Stonkstradamus-Inside-Bar-Pro-FTFC/)), built as an independent implementation in Zone Lab's own code — no code copied from that script:
+
+- **FTFC gate (02 + 03, `useFTFC`, default on):** the last closed candle on 5m, 15m, 60m and Daily must all point the same way before a signal fires — all four green for longs, all four red for shorts, mixed means no trade. Hypothesis under test: the 6-month backtest's losing shorts (22% win rate, −$115.22) were taken against higher-timeframe direction, and FTFC should screen out the worst of them. FTFC state (BULL / BEAR / MIXED) is shown as a new row in the indicator dashboard.
+- **2-1-2 inside-bar trigger (02 + 03, `useInsideBar`, default on):** a directional bar, then an inside bar (the pause), then a break of the inside bar. Entry on the break, stop at the other side of the inside bar, target at the directional bar's extreme — defined risk on every trade. Inside-bar signals use their own stop/target (not the ATR stop) in both the indicator's plotted levels and the strategy's exits, and risk sizing is computed from that stop. Marked with a 2-1-2 diamond on the chart and tagged in alerts.
+- Both are toggleable inputs so each can be A/B tested against v3.1. The strategy (03) trades exactly the same signal set as the indicator (02), including the new trigger and gate.
+
+Test plan (same as v3.1): compile-check both files on Chart GT, Strategy Tester on Nov 13–20, 2026 (v3.1: 9 trades, +$59.89, PF 2.911), then the 6-month deep backtest (v3.1: −$86.96, PF 0.298 on regular-session-only data — see the caveat above). Note the deep run *can* test the 2-1-2 trigger fairly (it needs no premarket data), but still cannot test the premarket-retest signals. v4 is a hypothesis, not a fix — the numbers decide whether it stays.
+
 ## Validation checklist
 
 - Compile each script in TradingView Pine Editor (Pine Script v6).

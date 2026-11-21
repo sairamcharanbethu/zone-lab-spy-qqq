@@ -16,6 +16,11 @@ strategy("Zone Lab — Intraday Signal Backtest", shorttitle="Zone Lab Test", ov
 // emulator rejected every entry — v3 took zero trades on Nov 13-20, 2026
 // while v2 took 4. Risk per trade in this backtest is therefore capped
 // below riskPct; it measures R-multiples, not dollar risk.
+// v4: FTFC gate (5m/15m/60m/Daily must all agree) on every signal, plus
+// 2-1-2 inside-bar breaks (The Strat) as an extra trigger. Inside-bar
+// entries use defined risk — stop at the other side of the inside bar,
+// target at the directional bar's extreme — instead of the ATR stop.
+// Both are toggleable inputs (useFTFC, useInsideBar) for A/B testing.
 string TZ = "America/New_York"
 string pmSession = input.session("0400-0930", "Premarket (New York)")
 int retestBars = input.int(10, "Retest window", minval=1, maxval=40)
@@ -35,6 +40,8 @@ float riskPct = input.float(1.0, "Risk per trade (% of equity)", minval=0.1, max
 float maxDailyLossPct = input.float(2.0, "Max daily loss (% of equity)", minval=0.5, maxval=10.0, step=0.5)
 int timeStopMin = input.int(30, "Time stop (minutes in trade, 1m chart)", minval=5, maxval=120)
 int partialPct = input.int(50, "Scale out at 1R (% of position)", minval=10, maxval=90, step=10)
+bool useFTFC = input.bool(true, "Require FTFC (5m/15m/60m/Daily all agree)")
+bool useInsideBar = input.bool(true, "Trade 2-1-2 inside-bar breaks")
 
 bool inPM = not na(time(timeframe.period, pmSession, TZ))
 bool inEntryWindow = not na(time(timeframe.period, entrySession, TZ))
@@ -57,9 +64,20 @@ float vwap = ta.vwap(hlc3)
 float atr = ta.atr(atrLen)
 float volAvg = ta.sma(volume, volLen)
 float rvol = volAvg > 0 ? volume / volAvg : na
-[close5, ema5, ema5Prev] = request.security(syminfo.tickerid, "5", [close[1], ta.ema(close, 50)[1], ta.ema(close, 50)[2]], lookahead=barmerge.lookahead_on)
+[close5, ema5, ema5Prev, open5] = request.security(syminfo.tickerid, "5", [close[1], ta.ema(close, 50)[1], ta.ema(close, 50)[2], open[1]], lookahead=barmerge.lookahead_on)
 bool longTrend = close5 > ema5 and ema5 > ema5Prev
 bool shortTrend = close5 < ema5 and ema5 < ema5Prev
+
+// v4 — FTFC (Full Time Frame Continuity), identical to the indicator (02).
+// The strategy must trade the SAME signal set as the indicator — that
+// mismatch bit v2.
+[close15, open15] = request.security(syminfo.tickerid, "15", [close[1], open[1]], lookahead=barmerge.lookahead_on)
+[close60, open60] = request.security(syminfo.tickerid, "60", [close[1], open[1]], lookahead=barmerge.lookahead_on)
+[closeD, openD] = request.security(syminfo.tickerid, "D", [close[1], open[1]], lookahead=barmerge.lookahead_on)
+bool ftfcLong = not na(close5) and not na(open5) and not na(close15) and not na(open15) and not na(close60) and not na(open60) and not na(closeD) and not na(openD) and close5 > open5 and close15 > open15 and close60 > open60 and closeD > openD
+bool ftfcShort = not na(close5) and not na(open5) and not na(close15) and not na(open15) and not na(close60) and not na(open60) and not na(closeD) and not na(openD) and close5 < open5 and close15 < open15 and close60 < open60 and closeD < openD
+bool ftfcLongOK = not useFTFC or ftfcLong
+bool ftfcShortOK = not useFTFC or ftfcShort
 
 var int upBar = na
 var int downBar = na
@@ -92,8 +110,15 @@ bool failedPMLow = not na(pmLow) and low < pmLow and close > pmLow and close > o
 bool failedPDH = high > pdh and close < pdh and close < open
 bool failedPDL = low < pdl and close > pdl and close > open
 
-bool longOK = inEntryWindow and barstate.isconfirmed and (longRetest or failedPMLow or failedPDL) and rvol >= minRVOL and (not useVWAP or close > vwap) and (not use5m or longTrend)
-bool shortOK = inEntryWindow and barstate.isconfirmed and (shortRetest or failedPMHigh or failedPDH) and rvol >= minRVOL and (not useVWAP or close < vwap) and (not use5m or shortTrend)
+// v4 — 2-1-2 inside-bar break (The Strat), identical to the indicator (02).
+bool c2Up = high[2] > high[3] and low[2] >= low[3] and close[2] > open[2]
+bool c2Down = low[2] < low[3] and high[2] <= high[3] and close[2] < open[2]
+bool c1Inside = high[1] <= high[2] and low[1] >= low[2]
+bool longInside = useInsideBar and c2Up and c1Inside and close > high[1] and close > open
+bool shortInside = useInsideBar and c2Down and c1Inside and close < low[1] and close < open
+
+bool longOK = inEntryWindow and barstate.isconfirmed and ftfcLongOK and (longRetest or failedPMLow or failedPDL or longInside) and rvol >= minRVOL and (not useVWAP or close > vwap) and (not use5m or longTrend)
+bool shortOK = inEntryWindow and barstate.isconfirmed and ftfcShortOK and (shortRetest or failedPMHigh or failedPDH or shortInside) and rvol >= minRVOL and (not useVWAP or close < vwap) and (not use5m or shortTrend)
 // Daily loss limit: once the day is down maxDailyLossPct from the open,
 // no new entries. Prevents a bad day from becoming a revenge-trading day.
 var float dayStartEquity = na
@@ -113,7 +138,9 @@ if strategy.position_size == 0
     entryBar := na
 if allowed and longOK
     float riskAmt = strategy.equity * riskPct / 100
-    float stopDist = atr * stopATR
+    float atrStopDist = atr * stopATR
+    // 2-1-2 entries risk to the other side of the inside bar, not the ATR stop.
+    float stopDist = longInside ? close - low[1] : atrStopDist
     float riskQty = stopDist > 0 ? riskAmt / stopDist : na
     // FIX (v3.1): the 1-minute ATR stop is tiny in dollars, so raw risk
     // sizing can ask for far more shares than the account can afford
@@ -124,8 +151,14 @@ if allowed and longOK
     // with $25k capital the backtest's risk per trade is capped well
     // below riskPct; it measures R-multiples, not dollar risk.
     float qty = na(riskQty) ? na : math.max(math.floor(math.min(riskQty, strategy.equity / close)), 1)
-    longStop := close - stopDist
-    longTarget := close + (close - longStop) * rewardR
+    if longInside
+        // 2-1-2 defined risk: stop at the other side of the inside bar,
+        // target at the directional bar's high.
+        longStop := low[1]
+        longTarget := high[2]
+    else
+        longStop := close - stopDist
+        longTarget := close + (close - longStop) * rewardR
     strategy.entry("LONG", strategy.long, qty=qty)
     // Scale out: take partialPct at 1R, let the rest run to 2R with the stop.
     strategy.exit("LONG 1R", "LONG", qty_percent=partialPct, limit=close + (close - longStop))
@@ -134,12 +167,20 @@ if allowed and longOK
     tradedToday := true
 if allowed and shortOK
     float riskAmt = strategy.equity * riskPct / 100
-    float stopDist = atr * stopATR
+    float atrStopDist = atr * stopATR
+    // 2-1-2 entries risk to the other side of the inside bar, not the ATR stop.
+    float stopDist = shortInside ? high[1] - close : atrStopDist
     float riskQty = stopDist > 0 ? riskAmt / stopDist : na
     // Same affordability cap as the long side (see note above).
     float qty = na(riskQty) ? na : math.max(math.floor(math.min(riskQty, strategy.equity / close)), 1)
-    shortStop := close + stopDist
-    shortTarget := close - (shortStop - close) * rewardR
+    if shortInside
+        // 2-1-2 defined risk: stop at the other side of the inside bar,
+        // target at the directional bar's low.
+        shortStop := high[1]
+        shortTarget := low[2]
+    else
+        shortStop := close + stopDist
+        shortTarget := close - (shortStop - close) * rewardR
     strategy.entry("SHORT", strategy.short, qty=qty)
     strategy.exit("SHORT 1R", "SHORT", qty_percent=partialPct, limit=close - (shortStop - close))
     strategy.exit("SHORT 2R", "SHORT", stop=shortStop, limit=shortTarget)
