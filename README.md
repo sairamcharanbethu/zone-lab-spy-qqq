@@ -25,6 +25,20 @@ An independent Pine Script v6 research project inspired by the publicly describe
 - The strategy backtest trades the underlying chart symbol as a share-price proxy. It does **not** simulate 0DTE option contracts, implied volatility, delta/gamma, theta decay, bid/ask spread, liquidity, contract selection, or broker execution.
 - No profitability or win-rate claim is made. A script compiling is not evidence of an edge.
 
+## v2 hardening (2026-11-20)
+
+A line-by-line review found five real failure modes, now fixed:
+
+1. **Stale breakout state (01)** — a timed-out breakout never disarmed, so a "retest" could fire hours after its window expired. It now disarms on timeout or on a close back through the level.
+2. **Overnight holds (03)** — the strategy had no end-of-day flatten, so a position whose stop/target were untouched was carried overnight and could gap through its stop. All positions now close at 15:55 ET (`eodSession` input).
+3. **Backtest didn't test its own system (03)** — it traded retests only, while the indicator (02) also signals failed breakouts. The strategy now trades the same signal set as the indicator, so its results describe the system it claims to test.
+4. **No entry window (01, 02, 03)** — signals could fire at 15:59 with no time left for the trade. New `entrySession` input (defaults 09:30–16:00 for indicators, 09:30–15:30 for the strategy).
+5. **Silent failure without premarket data (01, 02)** — with extended-hours data off, the levels were blank and no signal could fire, with nothing saying why. A warning label now appears on the chart.
+
+Also: 01 signals are now confirmed-bar only (no intrabar repaint on a 1-minute chart).
+
+Honest limit: none of this makes the system "unstoppable." It removes specific, identified failure modes. The strategy still needs to be compiled in TradingView, backtested out-of-sample, and paper-traded before any real capital — and the backtest still trades the underlying share price, not 0DTE options.
+
 ## Validation checklist
 
 - Compile each script in TradingView Pine Editor (Pine Script v6).

@@ -16,8 +16,12 @@ int endDate = input.time(timestamp("31 Dec 2030 23:59 -0500"), "Backtest end")
 bool useVWAP = input.bool(true, "VWAP filter")
 bool use5m = input.bool(true, "Confirmed 5m trend filter")
 bool oneTradeDay = input.bool(true, "Maximum one entry per day")
+string entrySession = input.session("0930-1530", "Entry window (New York)")
+string eodSession = input.session("1555-1600", "End-of-day flatten window (New York)")
 
 bool inPM = not na(time(timeframe.period, pmSession, TZ))
+bool inEntryWindow = not na(time(timeframe.period, entrySession, TZ))
+bool eodFlat = not na(time(timeframe.period, eodSession, TZ))
 bool newDay = ta.change(time("D", "0000-2359", TZ)) != 0
 var float pmHigh = na
 var float pmLow = na
@@ -30,6 +34,8 @@ if inPM
     pmHigh := na(pmHigh) ? high : math.max(pmHigh, high)
     pmLow := na(pmLow) ? low : math.min(pmLow, low)
 
+float pdh = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_on)
+float pdl = request.security(syminfo.tickerid, "D", low[1], lookahead=barmerge.lookahead_on)
 float vwap = ta.vwap(hlc3)
 float atr = ta.atr(atrLen)
 float volAvg = ta.sma(volume, volLen)
@@ -61,8 +67,16 @@ if longRetest
 if shortRetest
     downArmed := false
 
-bool longOK = barstate.isconfirmed and longRetest and rvol >= minRVOL and (not useVWAP or close > vwap) and (not use5m or longTrend)
-bool shortOK = barstate.isconfirmed and shortRetest and rvol >= minRVOL and (not useVWAP or close < vwap) and (not use5m or shortTrend)
+// v2: the backtest now trades the SAME signal set as the indicator (02) —
+// retests AND failed breakouts. Before, it only tested retests, so its
+// results did not describe the system it claimed to test.
+bool failedPMHigh = not na(pmHigh) and high > pmHigh and close < pmHigh and close < open
+bool failedPMLow = not na(pmLow) and low < pmLow and close > pmLow and close > open
+bool failedPDH = high > pdh and close < pdh and close < open
+bool failedPDL = low < pdl and close > pdl and close > open
+
+bool longOK = inEntryWindow and barstate.isconfirmed and (longRetest or failedPMLow or failedPDL) and rvol >= minRVOL and (not useVWAP or close > vwap) and (not use5m or longTrend)
+bool shortOK = inEntryWindow and barstate.isconfirmed and (shortRetest or failedPMHigh or failedPDH) and rvol >= minRVOL and (not useVWAP or close < vwap) and (not use5m or shortTrend)
 bool inDateRange = time >= startDate and time <= endDate
 bool allowed = inDateRange and (not oneTradeDay or not tradedToday) and strategy.position_size == 0
 
@@ -82,6 +96,12 @@ if allowed and shortOK
     strategy.entry("SHORT", strategy.short)
     strategy.exit("SHORT EXIT", "SHORT", stop=shortStop, limit=shortTarget)
     tradedToday := true
+
+// v2: FLAT BEFORE THE CLOSE. An intraday system must never hold overnight —
+// before this, a position whose stop/target were untouched was carried into
+// the next session and could gap straight through its stop.
+if eodFlat and strategy.position_size != 0
+    strategy.close_all(comment="EOD flat")
 
 plot(pmHigh, "PM High", color=color.lime, style=plot.style_linebr)
 plot(pmLow, "PM Low", color=color.red, style=plot.style_linebr)

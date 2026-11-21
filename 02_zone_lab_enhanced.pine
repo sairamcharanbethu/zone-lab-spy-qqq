@@ -14,8 +14,10 @@ int retestBars = input.int(10, "Retest must occur within bars", minval=1, maxval
 bool requireVWAP = input.bool(true, "Require VWAP alignment")
 bool require5m = input.bool(true, "Require confirmed 5-minute trend")
 bool showDashboard = input.bool(true, "Show dashboard")
+string entrySession = input.session("0930-1530", "Entry window (New York)")
 
 bool inPM = not na(time(timeframe.period, pmSession, TZ))
+bool inEntryWindow = not na(time(timeframe.period, entrySession, TZ))
 bool newDay = ta.change(time("D", "0000-2359", TZ)) != 0
 var float pmHigh = na
 var float pmLow = na
@@ -87,8 +89,10 @@ float barRange = math.max(high-low, syminfo.mintick)
 bool bullExhaustion = barRange > atr * 1.8 and close < low + barRange * 0.35 and rvol > 1.5
 bool bearExhaustion = barRange > atr * 1.8 and close > high - barRange * 0.35 and rvol > 1.5
 
-bool longSignal = barstate.isconfirmed and (retestLong or failedPMLow or failedPDL) and volumeOK and vwapLongOK and trendLongOK
-bool shortSignal = barstate.isconfirmed and (retestShort or failedPMHigh or failedPDH) and volumeOK and vwapShortOK and trendShortOK
+// v2: signals only inside the entry window — no 15:59 entries with no time
+// left for the trade to work.
+bool longSignal = inEntryWindow and barstate.isconfirmed and (retestLong or failedPMLow or failedPDL) and volumeOK and vwapLongOK and trendLongOK
+bool shortSignal = inEntryWindow and barstate.isconfirmed and (retestShort or failedPMHigh or failedPDH) and volumeOK and vwapShortOK and trendShortOK
 
 plot(pmHigh, "Premarket High", color=color.lime, linewidth=2, style=plot.style_linebr)
 plot(pmLow, "Premarket Low", color=color.red, linewidth=2, style=plot.style_linebr)
@@ -117,6 +121,16 @@ if barstate.islast and showDashboard
     table.cell(dash, 1, 4, na(pmHigh) or na(pmLow) ? "N/A" : str.tostring(pmHigh-pmLow, format.mintick))
     table.cell(dash, 0, 5, "Signal")
     table.cell(dash, 1, 5, longSignal ? "LONG" : shortSignal ? "SHORT" : "WAIT", text_color=longSignal ? color.lime : shortSignal ? color.red : color.gray)
+
+// Warn instead of failing silently when premarket bars are missing
+// (extended-hours data off).
+bool afterPM = not na(time(timeframe.period, "0930-1600", TZ))
+var label pmWarn = na
+if barstate.islast and afterPM and na(pmHigh) and na(pmWarn)
+    pmWarn := label.new(bar_index, high, "No premarket data — enable extended-hours data", color=color.new(color.orange, 0), textcolor=color.white, style=label.style_label_down, size=size.small)
+if not na(pmHigh) and not na(pmWarn)
+    label.delete(pmWarn)
+    pmWarn := na
 
 alertcondition(longSignal, "Zone Lab LONG", "Zone Lab confirmed LONG setup")
 alertcondition(shortSignal, "Zone Lab SHORT", "Zone Lab confirmed SHORT setup")
